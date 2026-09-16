@@ -843,9 +843,66 @@ core::HotkeySpec* SettingsWindow::SlotSpec(int slot) {
     return nullptr;
 }
 
-bool SettingsWindow::Show(HINSTANCE instance, core::AppRuleStore& store, SettingsHost host) {
+namespace {
+
+// Move a window that is not visible on any monitor (off-screen, or on a
+// monitor that has been unplugged) back onto the primary work area.
+void CenterOnPrimaryMonitor(HWND hwnd) {
+    const HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return;
+    }
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect)) {
+        return;
+    }
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    const int left = info.rcWork.left + ((info.rcWork.right - info.rcWork.left) - width) / 2;
+    const int top = info.rcWork.top + ((info.rcWork.bottom - info.rcWork.top) - height) / 2;
+    SetWindowPos(hwnd, nullptr, left, top, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+}
+
+// A. Bring an already-open settings window back under the user's cursor.
+//
+// SetForegroundWindow alone is not enough: the window may be minimised, buried
+// behind other windows, or parked on a monitor that no longer exists -- in
+// every one of those cases the user sees "nothing happened", which is exactly
+// the silent-failure bug this sequence fixes.
+void ActivateExistingWindow(HWND hwnd) {
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    ShowWindow(hwnd, SW_SHOW);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    // Off-screen / vanished monitor: without this the window is technically
+    // "shown" but cannot be seen anywhere.
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) == nullptr) {
+        CenterOnPrimaryMonitor(hwnd);
+    }
+    if (!SetForegroundWindow(hwnd)) {
+        // The foreground request was denied (foreground lockout). There is no
+        // tray icon by design, so the taskbar button is the only visible
+        // anchor -- flash it until the user comes back to it.
+        FLASHWINFO flash{};
+        flash.cbSize = sizeof(flash);
+        flash.hwnd = hwnd;
+        flash.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+        flash.uCount = 0;
+        flash.dwTimeout = 0;
+        FlashWindowEx(&flash);
+    }
+}
+
+}  // namespace
+
+bool SettingsWindow::Show(HINSTANCE instance, core::AppRuleStore& store, SettingsHost host,
+                          const std::wstring& page) {
     if (hwnd_ != nullptr) {
-        SetForegroundWindow(hwnd_);
+        ActivateExistingWindow(hwnd_);
+        FocusPage(page);
         return true;
     }
     s_instance_ = this;
@@ -887,7 +944,26 @@ bool SettingsWindow::Show(HINSTANCE instance, core::AppRuleStore& store, Setting
     ShowWindow(hwnd_, SW_SHOW);
     UpdateWindow(hwnd_);
     SetForegroundWindow(hwnd_);
+    FocusPage(page);
     return true;
+}
+
+void SettingsWindow::FocusPage(const std::wstring& page) {
+    if (page.empty()) {
+        return;  // no page requested: keep the default focus
+    }
+    HWND target = nullptr;
+    if (page == L"rules") {
+        target = listRules_;
+    } else if (page == L"hotkeys") {
+        // The "record" button is the actionable hotkey control; only fall back
+        // to the value label if the button is somehow missing.
+        target = (buttonRecord_[0] != nullptr) ? buttonRecord_[0] : valueHotkey_[0];
+    }
+    if (target == nullptr || !IsWindow(target)) {
+        return;  // degrade silently: never fail a wake-up over focus
+    }
+    SetFocus(target);
 }
 
 void SettingsWindow::CreateControls() {

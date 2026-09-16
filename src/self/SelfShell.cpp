@@ -1,6 +1,7 @@
 #include "self/SelfShell.h"
 
 #include "core/TargetEnumerator.h"
+#include "self/InstanceHandoff.h"
 #include "self/Logger.h"
 
 #include <commctrl.h>
@@ -34,10 +35,19 @@ SelfShell::SelfShell() : orchestrator_(ruleStore_, stateStore_, resolver_) {}
 
 SelfShell::~SelfShell() = default;
 
-int SelfShell::Run(HINSTANCE instance, bool showSettingsRequested) {
+int SelfShell::Run(HINSTANCE instance, bool showSettingsRequested, const std::wstring& page) {
     instance_ = this;
     hinstance_ = instance;
     showSettingsMessage_ = RegisterWindowMessageW(kMessageName);
+
+    // Drop any wake request left over from a previous session: acting on it
+    // would pop the settings window without the user asking, which is an
+    // unnecessary exposure for a hiding tool.
+    DiscardPendingWakeRequest();
+
+    // E: record this instance (pid + module path) so a second launch can name
+    // the running copy -- and end it -- if it ever stops responding.
+    WriteOwnInstanceMarker();
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);
@@ -82,7 +92,7 @@ int SelfShell::Run(HINSTANCE instance, bool showSettingsRequested) {
     }
 
     if (showSettingsRequested) {
-        ShowSettings();
+        ShowSettings(page);
     }
 
     MSG message{};
@@ -159,7 +169,33 @@ bool SelfShell::ProbeHotkey(int slotId, const core::HotkeySpec& spec, bool* conf
     return false;
 }
 
-void SelfShell::ShowSettings() {
+void SelfShell::HandleWakeRequest() {
+    // C: the second instance parked its intent in wake-request.json. Consume it
+    // (read + delete) so an old request can never be replayed on a later wake.
+    // A missing or corrupt file degrades to "just open the settings window".
+    WakeRequest request;
+    const WakeRequestStatus status = ReadAndConsumeWakeRequest(WakeRequestPath(), request);
+    if (status == WakeRequestStatus::Stale) {
+        // A leftover request from a wake that was never acknowledged. Acting on
+        // it would open the settings window without the user asking, so drop it
+        // and leave the desktop exactly as it is. Deliberately no
+        // acknowledgement: a stale request means there is no live second
+        // instance waiting for one.
+        return;
+    }
+    if (status == WakeRequestStatus::Missing) {
+        request = WakeRequest{};
+    }
+    ShowSettings(request.page);
+
+    // B: acknowledge ONLY now -- after the window has actually been shown. The
+    // second instance waits on this to tell a healthy instance from a hung one.
+    if (wakeAckEvent_ != nullptr) {
+        SetEvent(wakeAckEvent_);
+    }
+}
+
+void SelfShell::ShowSettings(const std::wstring& page) {
     ui::SettingsHost host;
     host.suspendHotkeys = [this]() { hotkeys_.UnregisterAll(hwnd_); };
     host.resumeHotkeys = [this]() { RegisterHotkeys(); };
@@ -173,7 +209,7 @@ void SelfShell::ShowSettings() {
     };
     host.enumerateTargets = [this]() { return core::EnumerateTargetCandidates(resolver_); };
     host.onQuitApp = [this]() { QuitApplication(); };
-    settings_.Show(hinstance_, ruleStore_, std::move(host));
+    settings_.Show(hinstance_, ruleStore_, std::move(host), page);
 }
 
 void SelfShell::QuitApplication() {
@@ -219,8 +255,27 @@ void SelfShell::StartEventThread() {
         return;
     }
     showSettingsEvent_ = CreateEventW(nullptr, FALSE, FALSE, kEventName);
+    // B: created (not opened) so this works no matter which side started first.
+    wakeAckEvent_ = CreateEventW(nullptr, FALSE, FALSE, WakeAckEventName());
     quitEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (showSettingsEvent_ == nullptr || quitEvent_ == nullptr) {
+        // Nothing will start, so StopEventThread -- whose teardown is gated on
+        // eventThreadStarted_ -- never runs. Release every handle created above
+        // here, otherwise they are leaked for the lifetime of the process.
+        if (showSettingsEvent_ != nullptr) {
+            CloseHandle(showSettingsEvent_);
+            showSettingsEvent_ = nullptr;
+        }
+        if (quitEvent_ != nullptr) {
+            CloseHandle(quitEvent_);
+            quitEvent_ = nullptr;
+        }
+        if (wakeAckEvent_ != nullptr) {
+            // Best-effort handle: losing it just means a second instance falls
+            // back to the timeout prompt instead of a clean handshake.
+            CloseHandle(wakeAckEvent_);
+            wakeAckEvent_ = nullptr;
+        }
         return;
     }
     eventThreadStarted_ = true;
@@ -240,6 +295,10 @@ void SelfShell::StopEventThread() {
     if (showSettingsEvent_ != nullptr) {
         CloseHandle(showSettingsEvent_);
         showSettingsEvent_ = nullptr;
+    }
+    if (wakeAckEvent_ != nullptr) {
+        CloseHandle(wakeAckEvent_);
+        wakeAckEvent_ = nullptr;
     }
     if (quitEvent_ != nullptr) {
         CloseHandle(quitEvent_);
@@ -262,7 +321,9 @@ void SelfShell::EventThreadMain() {
 
 LRESULT CALLBACK SelfShell::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (instance_ != nullptr && showSettingsMessage_ != 0 && message == showSettingsMessage_) {
-        instance_->ShowSettings();
+        // Runs on the UI thread, so the acknowledgement below is only sent once
+        // the settings window has really been brought forward.
+        instance_->HandleWakeRequest();
         return 0;
     }
     switch (message) {

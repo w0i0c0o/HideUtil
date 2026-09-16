@@ -11,6 +11,7 @@
 #include "core/StateStore.h"
 #include "core/TargetEnumerator.h"
 #include "self/HotkeyManager.h"
+#include "self/InstanceHandoff.h"
 
 #include <windows.h>
 
@@ -1281,6 +1282,234 @@ void TestBringRestoredToFrontConfig() {
     CHECK(flag->AsBool() == true);
 }
 
+// ---------------------------------------------------------------------------
+// Second-instance hand-off.
+//
+// Pure logic only: argument classification and JSON round trips. These tests
+// deliberately never create a window, never touch the foreground and never
+// signal a named event -- the Win32 half of the hand-off is exercised by the
+// real binaries, not by the unit test process.
+// ---------------------------------------------------------------------------
+
+void TestLaunchArgsClassification() {
+    std::printf("-- launch args: forwardable vs rejected\n");
+    using hideutil::self::LaunchIntent;
+    using hideutil::self::ParseLaunchArgs;
+
+    // No arguments forwards "open settings" (the historical behaviour) but must
+    // NOT force the settings window open on a first launch.
+    const auto empty = ParseLaunchArgs(L"");
+    CHECK(empty.intent == LaunchIntent::Settings);
+    CHECK(empty.explicitSettings == false);
+    CHECK(empty.page.empty());
+
+    const auto settings = ParseLaunchArgs(L"--settings");
+    CHECK(settings.intent == LaunchIntent::Settings);
+    CHECK(settings.explicitSettings == true);
+
+    // --settings-dump must be refused, never mistaken for --settings. The old
+    // substring helper (CommandLineHasSwitch) made exactly that mistake.
+    const auto dump = ParseLaunchArgs(L"--settings-dump");
+    CHECK(dump.intent == LaunchIntent::Rejected);
+    CHECK(dump.rejectedSwitch == L"--settings-dump");
+
+    // Every state-changing switch is refused: honouring one from a shortcut
+    // would let a single command reveal hidden windows.
+    const wchar_t* rejected[] = {L"--hide", L"--restore", L"--status",
+                                 L"--suspend", L"--resume", L"--settings-dump"};
+    for (const wchar_t* switchName : rejected) {
+        const auto parsed = ParseLaunchArgs(switchName);
+        CHECK(parsed.intent == LaunchIntent::Rejected);
+        CHECK(parsed.rejectedSwitch == switchName);
+    }
+
+    // Rejection wins even when a friendly switch is also present.
+    const auto mixed = ParseLaunchArgs(L"--settings --restore");
+    CHECK(mixed.intent == LaunchIntent::Rejected);
+    CHECK(mixed.rejectedSwitch == L"--restore");
+
+    // Forwarded pages.
+    const auto rules = ParseLaunchArgs(L"--settings --page=rules");
+    CHECK(rules.intent == LaunchIntent::Settings);
+    CHECK(rules.page == L"rules");
+    const auto hotkeys = ParseLaunchArgs(L"--page=hotkeys");
+    CHECK(hotkeys.intent == LaunchIntent::Settings);
+    CHECK(hotkeys.page == L"hotkeys");
+    // An unknown page degrades to the default view instead of failing.
+    const auto bogus = ParseLaunchArgs(L"--settings --page=nope");
+    CHECK(bogus.intent == LaunchIntent::Settings);
+    CHECK(bogus.page.empty());
+    // Quoted values tokenise correctly.
+    const auto quoted = ParseLaunchArgs(L"--settings --page=\"rules\"");
+    CHECK(quoted.page == L"rules");
+    // Unknown switches are ignored so launching never breaks.
+    const auto unknown = ParseLaunchArgs(L"--whatever --settings");
+    CHECK(unknown.intent == LaunchIntent::Settings);
+    CHECK(unknown.explicitSettings == true);
+
+    // Tokeniser.
+    const std::vector<std::wstring> tokens =
+        hideutil::self::TokenizeCommandLine(L"  --settings   --page=rules  ");
+    CHECK(tokens.size() == 2u);
+    CHECK(tokens[0] == L"--settings");
+    CHECK(tokens[1] == L"--page=rules");
+}
+
+void TestWakeRequestJsonRoundTrip() {
+    std::printf("-- wake request json round trip\n");
+    using hideutil::self::WakeRequest;
+
+    WakeRequest request;
+    request.pid = 4242u;
+    request.action = L"settings";
+    request.page = L"rules";
+    request.writtenAtMs = 1234567u;
+
+    const std::wstring text = hideutil::self::SerializeWakeRequest(request);
+    WakeRequest back;
+    CHECK(hideutil::self::DeserializeWakeRequest(text, back));
+    CHECK(back.pid == 4242u);
+    CHECK(back.action == L"settings");
+    CHECK(back.page == L"rules");
+    CHECK(back.writtenAtMs == 1234567u);
+
+    // A missing action falls back to "settings".
+    WakeRequest minimal;
+    CHECK(hideutil::self::DeserializeWakeRequest(L"{\"pid\":7}", minimal));
+    CHECK(minimal.pid == 7u);
+    CHECK(minimal.action == L"settings");
+    CHECK(minimal.page.empty());
+
+    // An unknown page degrades to the default view.
+    WakeRequest badPage;
+    CHECK(hideutil::self::DeserializeWakeRequest(
+        L"{\"pid\":7,\"action\":\"settings\",\"page\":\"nope\"}", badPage));
+    CHECK(badPage.page.empty());
+
+    // Malformed input is reported, never thrown.
+    WakeRequest broken;
+    CHECK(hideutil::self::DeserializeWakeRequest(L"{not json", broken) == false);
+
+    // File round trip: written atomically and consumed (deleted) exactly once.
+    const std::wstring path = L"hideutil_test_wake_request.json";
+    DeleteFileW(path.c_str());
+    CHECK(hideutil::self::WriteWakeRequest(path, request));
+    CHECK(GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES);
+
+    WakeRequest consumed;
+    CHECK(hideutil::self::ReadAndConsumeWakeRequest(path, consumed) ==
+          hideutil::self::WakeRequestStatus::Consumed);
+    CHECK(consumed.pid == 4242u);
+    CHECK(consumed.page == L"rules");
+    // Writing stamps a monotonic timestamp so the reader can age the request.
+    CHECK(consumed.writtenAtMs != 0u);
+    // One-shot: the file must be gone so an old intent is never replayed.
+    CHECK(GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
+    // A missing file degrades instead of crashing.
+    WakeRequest missing;
+    CHECK(hideutil::self::ReadAndConsumeWakeRequest(path, missing) ==
+          hideutil::self::WakeRequestStatus::Missing);
+    DeleteFileW(path.c_str());
+}
+
+void TestWakeRequestExpiry() {
+    std::printf("-- wake request expiry (stale requests are discarded)\n");
+    using hideutil::self::IsWakeRequestStale;
+    using hideutil::self::kMaxWakeRequestAgeMs;
+    using hideutil::self::WakeRequest;
+    using hideutil::self::WakeRequestStatus;
+
+    // Pure age check (monotonic milliseconds).
+    CHECK(IsWakeRequestStale(1000, 1000) == false);
+    CHECK(IsWakeRequestStale(1000, 1000 + kMaxWakeRequestAgeMs) == false);
+    CHECK(IsWakeRequestStale(1000, 1000 + kMaxWakeRequestAgeMs + 1) == true);
+    CHECK(IsWakeRequestStale(0, kMaxWakeRequestAgeMs + 1) == true);
+    // A timestamp in the future yields a huge unsigned age and is treated as
+    // stale: fail closed rather than act on a request we cannot age.
+    CHECK(IsWakeRequestStale(5000, 1000) == true);
+
+    const std::wstring path = L"hideutil_test_wake_stale.json";
+    DeleteFileW(path.c_str());
+
+    // A request written 30 seconds ago must be discarded, not executed: acting
+    // on it would pop the settings window without the user asking.
+    WakeRequest old;
+    old.pid = 1u;
+    old.page = L"rules";
+    old.writtenAtMs = GetTickCount64() - 30000;
+    CHECK(hideutil::core::WriteTextFileUtf8(path, hideutil::self::SerializeWakeRequest(old)));
+
+    WakeRequest staleRead;
+    CHECK(hideutil::self::ReadAndConsumeWakeRequest(path, staleRead) ==
+          WakeRequestStatus::Stale);
+    // Removed as well, so it cannot fire on some later wake either.
+    CHECK(GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
+
+    // A request written right now is still consumable.
+    WakeRequest fresh;
+    fresh.pid = 2u;
+    fresh.page = L"hotkeys";
+    CHECK(hideutil::self::WriteWakeRequest(path, fresh));
+    WakeRequest freshRead;
+    CHECK(hideutil::self::ReadAndConsumeWakeRequest(path, freshRead) ==
+          WakeRequestStatus::Consumed);
+    CHECK(freshRead.page == L"hotkeys");
+
+    DeleteFileW(path.c_str());
+}
+
+void TestRejectedSwitchMessage() {
+    std::printf("-- rejected switch is reported to the user\n");
+    // A refusal must always be visible: a silent exit looks like "nothing
+    // happened", which is the failure mode this round removes.
+    const std::wstring message = hideutil::self::BuildRejectedSwitchMessage(L"--restore");
+    CHECK(message.find(L"--restore") != std::wstring::npos);
+    CHECK(message.find(L"不支持") != std::wstring::npos);
+    CHECK(message.find(L"hideutil_cli.exe") != std::wstring::npos);
+    // The offending token is echoed back so the user sees which switch failed.
+    const std::wstring other = hideutil::self::BuildRejectedSwitchMessage(L"--settings-dump");
+    CHECK(other.find(L"--settings-dump") != std::wstring::npos);
+}
+
+void TestLastInstanceMarkerRoundTrip() {
+    std::printf("-- last instance marker round trip\n");
+    using hideutil::self::LastInstanceInfo;
+
+    LastInstanceInfo info;
+    info.pid = 999u;
+    info.path = L"C:\\Program Files\\HideUtil\\HideUtil.exe";
+    info.startedAt = 1700000000;
+
+    const std::wstring text = hideutil::self::SerializeLastInstance(info);
+    LastInstanceInfo back;
+    CHECK(hideutil::self::DeserializeLastInstance(text, back));
+    CHECK(back.pid == 999u);
+    CHECK(back.path == info.path);
+    CHECK(back.startedAt == 1700000000);
+
+    // Partial documents still parse (every member is optional).
+    LastInstanceInfo partial;
+    CHECK(hideutil::self::DeserializeLastInstance(L"{\"pid\":5}", partial));
+    CHECK(partial.pid == 5u);
+    CHECK(partial.path.empty());
+
+    LastInstanceInfo broken;
+    CHECK(hideutil::self::DeserializeLastInstance(L"nope", broken) == false);
+}
+
+void TestUnresponsivePromptWording() {
+    std::printf("-- unresponsive prompt wording\n");
+    // Without a differing path the prompt stays short (the normal case).
+    const std::wstring plain = hideutil::self::BuildUnresponsivePrompt(L"");
+    CHECK(plain.find(L"没有响应") != std::wstring::npos);
+    CHECK(plain.find(L"运行中的实例路径") == std::wstring::npos);
+
+    // A different build is running: name it so the user can find the stale copy.
+    const std::wstring withPath = hideutil::self::BuildUnresponsivePrompt(L"D:\\old\\HideUtil.exe");
+    CHECK(withPath.find(L"没有响应") != std::wstring::npos);
+    CHECK(withPath.find(L"D:\\old\\HideUtil.exe") != std::wstring::npos);
+}
+
 }  // namespace
 
 int wmain() {
@@ -1314,6 +1543,12 @@ int wmain() {
     TestBringRestoredToFrontToggle();
     TestRestoreDoesNotStealForeground();
     TestBringRestoredToFrontConfig();
+    TestLaunchArgsClassification();
+    TestWakeRequestJsonRoundTrip();
+    TestWakeRequestExpiry();
+    TestLastInstanceMarkerRoundTrip();
+    TestUnresponsivePromptWording();
+    TestRejectedSwitchMessage();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

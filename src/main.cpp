@@ -1,51 +1,46 @@
 // Windowless entry point for the HideUtil GUI deliverable.
+#include "self/InstanceHandoff.h"
 #include "self/SelfShell.h"
 
 #include <windows.h>
 
-#include <cwchar>
 #include <string>
-
-namespace {
-
-bool CommandLineHasSwitch(const wchar_t* commandLine, const wchar_t* switchName) {
-    if (commandLine == nullptr || switchName == nullptr) {
-        return false;
-    }
-    const std::wstring line = commandLine;
-    return line.find(switchName) != std::wstring::npos;
-}
-
-// Wake the already-running instance so it opens the settings window, then exit.
-void SignalExistingInstance(HWND hwndOwner, const wchar_t* eventName, const wchar_t* messageName) {
-    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName);
-    if (event != nullptr) {
-        SetEvent(event);
-        CloseHandle(event);
-    }
-    const UINT message = RegisterWindowMessageW(messageName);
-    if (message != 0) {
-        // Secondary channel; message-only windows do not receive broadcasts, so
-        // the named event above is the reliable signal.
-        PostMessageW(HWND_BROADCAST, message, 0, 0);
-    }
-    (void)hwndOwner;
-}
-
-}  // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmdLine,
                     int /*nCmdShow*/) {
-    const bool showSettings = CommandLineHasSwitch(pCmdLine, L"--settings");
+    using hideutil::self::LaunchExitCode;
+    using hideutil::self::LaunchIntent;
 
-    // Single instance: the first process owns the mutex; later ones just wake it.
+    const std::wstring commandLine =
+        (pCmdLine != nullptr) ? std::wstring(pCmdLine) : std::wstring();
+
+    // C: classify the command line before anything else. State-changing
+    // switches are refused for the first instance too -- they belong to
+    // hideutil_cli.exe, and honouring them from a stray shortcut would let one
+    // command reveal hidden windows, which is a back door into a privacy tool.
+    const hideutil::self::ParsedLaunchArgs args = hideutil::self::ParseLaunchArgs(commandLine);
+    if (args.intent == LaunchIntent::Rejected) {
+        // Tell the user, then exit 4. Returning silently would be
+        // indistinguishable from "the launch did nothing" -- the exact
+        // silent-failure class this hand-off removes.
+        return hideutil::self::ReportRejectedSwitch(args.rejectedSwitch);
+    }
+
+    // Single instance: the first process owns the mutex; later ones hand their
+    // intent over instead of exiting silently.
+    //
+    // The `(mutex != nullptr)` guard is deliberate and must stay: if
+    // CreateMutexW fails we prefer running a second copy over refusing to start
+    // at all.
     HANDLE mutex = CreateMutexW(nullptr, TRUE, hideutil::self::SelfShell::SingleInstanceMutexName());
     const bool alreadyRunning = (mutex != nullptr) && (GetLastError() == ERROR_ALREADY_EXISTS);
     if (alreadyRunning) {
-        SignalExistingInstance(nullptr, hideutil::self::SelfShell::ShowSettingsEventName(),
-                               hideutil::self::SelfShell::ShowSettingsMessageName());
+        // B/C/E: forward the request, wait for the acknowledgement, and prompt
+        // when the running instance turns out to be unresponsive.
+        const hideutil::self::HandoffResult handoff =
+            hideutil::self::RunSecondInstanceHandoff(commandLine);
         CloseHandle(mutex);
-        return 0;
+        return static_cast<int>(handoff.exitCode);
     }
 
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -56,7 +51,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
         // SelfShell owns the orchestrator, which owns COM objects. Destroy it
         // while the STA apartment is still initialised.
         hideutil::self::SelfShell shell;
-        exitCode = shell.Run(hInstance, showSettings);
+        exitCode = shell.Run(hInstance, args.explicitSettings, args.page);
     }
 
     if (comInitialized) {

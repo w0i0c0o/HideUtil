@@ -40,6 +40,7 @@ add_library(hideutil_core STATIC
     src/self/HotkeyManager.cpp
     src/self/Logger.cpp
     src/self/SelfShell.cpp
+    src/self/InstanceHandoff.cpp
 )
 
 target_include_directories(hideutil_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

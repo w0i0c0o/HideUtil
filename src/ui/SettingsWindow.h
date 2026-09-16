@@ -56,7 +56,11 @@ public:
     static void RegisterWindowClass(HINSTANCE instance);
     static const wchar_t* ClassName();
 
-    bool Show(HINSTANCE instance, core::AppRuleStore& store, SettingsHost host);
+    // `page` optionally selects which part of the window receives focus:
+    // "rules" -> the rule list, "hotkeys" -> the hotkey controls. An empty or
+    // unrecognised page degrades to the default focus.
+    bool Show(HINSTANCE instance, core::AppRuleStore& store, SettingsHost host,
+              const std::wstring& page = std::wstring());
     void Destroy();
     bool IsOpen() const { return hwnd_ != nullptr; }
     HWND Handle() const { return hwnd_; }
@@ -70,6 +74,10 @@ private:
     void RefreshHotkeyLabels();
     void RefreshRules();
     int SelectedRuleIndex() const;
+
+    // Move the keyboard focus to the control belonging to `page` ("rules" /
+    // "hotkeys"). Missing controls degrade silently to the default focus.
+    void FocusPage(const std::wstring& page);
 
     void BeginRecord(int slot);
     bool CaptureHotkey(WPARAM vk);

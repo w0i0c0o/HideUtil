@@ -27,10 +27,17 @@ public:
     SelfShell& operator=(const SelfShell&) = delete;
 
     // showSettingsRequested: the process was launched with --settings.
-    int Run(HINSTANCE instance, bool showSettingsRequested);
+    // `page` selects which part of the settings window takes focus ("rules" /
+    // "hotkeys"); empty means the default.
+    int Run(HINSTANCE instance, bool showSettingsRequested,
+            const std::wstring& page = std::wstring());
 
     // Show / focus the settings window (created on demand).
-    void ShowSettings();
+    void ShowSettings(const std::wstring& page = std::wstring());
+
+    // Called when a second instance wakes us: consume its request file, act on
+    // it, then acknowledge so the other process knows we are alive.
+    void HandleWakeRequest();
 
     // Restore everything that was hidden, then terminate the process. Invoked
     // by the settings window's "退出 HideUtil" button.
@@ -66,6 +73,7 @@ private:
     ui::SettingsWindow settings_;
 
     HANDLE showSettingsEvent_ = nullptr;  // auto-reset, signaled by 2nd instance
+    HANDLE wakeAckEvent_ = nullptr;       // auto-reset, set after a wake is handled
     HANDLE quitEvent_ = nullptr;          // manual-reset, stops the wait thread
     std::thread eventThread_;
     bool eventThreadStarted_ = false;
