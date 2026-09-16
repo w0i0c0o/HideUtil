@@ -55,6 +55,28 @@ bool WindowHider::IsWindowResponsive(HWND hwnd) const {
     return sent != 0;
 }
 
+UINT ResolveRestoreShowCmd(UINT showCmd, BOOL wasVisible, LONG_PTR prevStyle) {
+    if (!wasVisible) {
+        // A window that was already hidden has no show state to protect.
+        return showCmd;
+    }
+    const bool invisibleShowCmd = (showCmd == SW_SHOWMINIMIZED) || (showCmd == SW_MINIMIZE) ||
+                                  (showCmd == SW_HIDE) || (showCmd == SW_FORCEMINIMIZE);
+    if (!invisibleShowCmd) {
+        return showCmd;  // nothing to correct
+    }
+    // Was the window genuinely minimized at hide time? Then preserving that is
+    // the correct behaviour -- the user had minimized it themselves.
+    const bool genuinelyMinimized =
+        ((prevStyle & WS_MINIMIZE) != 0) && ((prevStyle & WS_MAXIMIZE) == 0);
+    if (genuinelyMinimized) {
+        return showCmd;
+    }
+    // Transient / bogus minimized state: bring the window back to the visible
+    // state its style bits describe.
+    return ((prevStyle & WS_MAXIMIZE) != 0) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+}
+
 WindowSnapshot WindowHider::SnapshotWindow(HWND hwnd) const {
     WindowSnapshot snapshot;
     snapshot.hwnd = hwnd;
@@ -64,6 +86,10 @@ WindowSnapshot WindowHider::SnapshotWindow(HWND hwnd) const {
     snapshot.prevExStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     snapshot.placement.length = sizeof(WINDOWPLACEMENT);
     GetWindowPlacement(hwnd, &snapshot.placement);
+    // Normalise at capture time so the persisted state never carries a
+    // transient minimized placement (see ResolveRestoreShowCmd).
+    snapshot.placement.showCmd = ResolveRestoreShowCmd(
+        snapshot.placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
     snapshot.wasForeground = (GetForegroundWindow() == hwnd) ? TRUE : FALSE;
     snapshot.taskbarTabRemoved = FALSE;
     snapshot.altTabSuppressed = FALSE;
@@ -126,12 +152,24 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     // would otherwise force on top of it.
     WINDOWPLACEMENT placement = snapshot.placement;
     placement.length = sizeof(WINDOWPLACEMENT);
+    // Defensive second pass: a snapshot written by an older build (or by a
+    // hide that raced with the app's frame rebuild) can still carry a bogus
+    // SW_SHOWMINIMIZED. Never let it minimize a window that was visible.
+    placement.showCmd =
+        ResolveRestoreShowCmd(placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
     SetWindowPlacement(snapshot.hwnd, &placement);
 
     if (!snapshot.wasVisible) {
         // Originally-hidden window: keep it hidden. The async hide is fine
         // here (the user does not see a transition).
         ShowWindowAsync(snapshot.hwnd, SW_HIDE);
+    } else if (IsIconic(snapshot.hwnd)) {
+        // Belt and braces. If the window ended up minimized anyway (a placement
+        // whose rcNormalPosition/ptMinPosition disagrees with its showCmd, or
+        // an app that minimized itself while hidden), SW_RESTORE is the only
+        // call that clears WS_MINIMIZE and puts it back at its real geometry --
+        // SW_SHOW would leave the window minimized and off-screen.
+        ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
     // For the wasVisible==true path we deliberately do NOT issue
     // ShowWindow(SW_SHOW/SW_RESTORE): SetWindowPlacement above has already

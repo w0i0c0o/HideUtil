@@ -26,6 +26,23 @@ enum class WindowOpResult {
     Unresponsive,  // target thread not pumping messages; skipped, keep entry
 };
 
+// Choose the showCmd that must be applied when a window is brought back.
+//
+// Office applications (Excel) transiently report SW_SHOWMINIMIZED from
+// GetWindowPlacement while they rebuild their top-level frame -- which is
+// exactly what SetToolWindow triggers with SWP_FRAMECHANGED just before the
+// window is hidden. If that transient state is honoured, SetWindowPlacement
+// restores the window MINIMIZED and parked at (-32000,-32000): the user sees
+// the workbook collapse to a 160x28 sliver and the ribbon "disappear", and
+// there is no ShowWindow afterwards to undo it.
+//
+// Rule: a window that was visible when we hid it must come back visible. Only
+// a GENUINELY minimized window (WS_MINIMIZE set, WS_MAXIMIZE clear) is allowed
+// to be recorded / restored as minimized.
+//
+// Pure function so it can be unit-tested without real windows.
+UINT ResolveRestoreShowCmd(UINT showCmd, BOOL wasVisible, LONG_PTR prevStyle);
+
 class WindowHider {
 public:
     WindowHider();

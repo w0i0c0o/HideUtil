@@ -11,6 +11,7 @@
 #include "core/StateStore.h"
 #include "core/TargetEnumerator.h"
 #include "core/WinEventHook.h"
+#include "core/WindowHider.h"
 #include "self/HotkeyManager.h"
 #include "self/InstanceHandoff.h"
 
@@ -1640,6 +1641,77 @@ void TestWinEventHookFiltersChildShow() {
     DestroyWindow(topLevel);
 }
 
+// ---------------------------------------------------------------------------
+// Restore must never bring a visible window back MINIMIZED.
+//
+// Excel reports a transient SW_SHOWMINIMIZED from GetWindowPlacement while it
+// rebuilds its frame after SetToolWindow's SWP_FRAMECHANGED. Honouring that
+// restores the workbook as a 160x28 icon parked at (-32000,-32000), which the
+// user perceives as "the ribbon vanished".
+// ---------------------------------------------------------------------------
+
+void TestResolveRestoreShowCmd() {
+    std::printf("-- restore showCmd: a visible window never comes back minimized\n");
+    using hideutil::core::ResolveRestoreShowCmd;
+
+    const LONG_PTR visibleMax = WS_VISIBLE | WS_MAXIMIZE;
+    const LONG_PTR visibleNormal = WS_VISIBLE;
+    const LONG_PTR reallyMinimized = WS_VISIBLE | WS_MINIMIZE;
+
+    // Maximized window, transient minimized placement -> maximize on restore.
+    CHECK(ResolveRestoreShowCmd(SW_SHOWMINIMIZED, TRUE, visibleMax) == SW_SHOWMAXIMIZED);
+    // Normal window, transient minimized placement -> normal on restore.
+    CHECK(ResolveRestoreShowCmd(SW_SHOWMINIMIZED, TRUE, visibleNormal) == SW_SHOWNORMAL);
+    // SW_HIDE on a visible window is just as bogus.
+    CHECK(ResolveRestoreShowCmd(SW_HIDE, TRUE, visibleMax) == SW_SHOWMAXIMIZED);
+
+    // A GENUINELY minimized window must stay minimized (the user minimized it).
+    CHECK(ResolveRestoreShowCmd(SW_SHOWMINIMIZED, TRUE, reallyMinimized) == SW_SHOWMINIMIZED);
+
+    // Already-correct show commands are passed through untouched.
+    CHECK(ResolveRestoreShowCmd(SW_SHOWMAXIMIZED, TRUE, visibleMax) == SW_SHOWMAXIMIZED);
+    CHECK(ResolveRestoreShowCmd(SW_SHOWNORMAL, TRUE, visibleNormal) == SW_SHOWNORMAL);
+
+    // An originally-hidden window has no show state to protect.
+    CHECK(ResolveRestoreShowCmd(SW_SHOWMINIMIZED, FALSE, visibleMax) == SW_SHOWMINIMIZED);
+}
+
+void TestRestoreNeverLeavesWindowMinimized() {
+    std::printf("-- restore: minimized placement still comes back visible\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestRestore", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
+    CHECK(snapshot.wasVisible == TRUE);
+
+    // Reproduce the Excel failure: poison the snapshot with the transient
+    // minimized placement the app reported while rebuilding its frame.
+    snapshot.placement.showCmd = SW_SHOWMINIMIZED;
+    snapshot.wasVisible = TRUE;
+
+    const hideutil::core::WindowOpResult result = hider.RestoreWindow(snapshot, false);
+    CHECK(result == hideutil::core::WindowOpResult::Ok);
+
+    // The window must be back, not parked at (-32000,-32000) as a 160x28 icon.
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window));
+    CHECK((GetWindowLongPtrW(window, GWL_STYLE) & WS_MINIMIZE) == 0);
+
+    RECT rect{};
+    GetWindowRect(window, &rect);
+    // -32000 is where Windows parks minimized windows; anything there is wrong.
+    CHECK(rect.left > -30000 && rect.top > -30000);
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -1681,6 +1753,8 @@ int wmain() {
     TestRejectedSwitchMessage();
     TestRehidePolicySkipsChildWindows();
     TestWinEventHookFiltersChildShow();
+    TestResolveRestoreShowCmd();
+    TestRestoreNeverLeavesWindowMinimized();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,
