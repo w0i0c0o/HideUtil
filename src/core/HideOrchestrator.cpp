@@ -525,8 +525,49 @@ void HideOrchestrator::OnWindowShown(HWND hwnd, DWORD pid) {
     if (!ContainsPid(targetPids_, pid)) {
         return;
     }
-    // The target app re-showed its own window: hide it again.
-    windowHider_.HideWindow(hwnd);
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+        return;
+    }
+    // Never touch a child window.
+    //
+    // Excel's ribbon (Office rebuilds and re-shows its NetUIHWND /
+    // MsoCommandBarDock panes whenever the frame is recalculated -- which is
+    // precisely what WindowHider::SetToolWindow does with SWP_FRAMECHANGED
+    // just before the window is hidden) was being re-hidden here. While the
+    // parent is hidden the loss is invisible; once the parent comes back the
+    // ribbon stayed hidden, and since only top-level windows are ever
+    // snapshotted it had no restore path at all -- the ribbon only returned
+    // after Excel was restarted. Child panes are simply left alone now.
+    if (!ShouldRehideWindow(hwnd, GetAncestor(hwnd, GA_ROOT))) {
+        return;
+    }
+
+    // Record the window BEFORE hiding it. A window that first appears while we
+    // are hidden (a new workbook window in SDI Excel, a dialog) would
+    // otherwise be hidden with no snapshot entry and could never be restored.
+    // Snapshot semantics still apply: an entry that already exists is
+    // authoritative and is kept verbatim, never re-snapshotted.
+    std::vector<WindowSnapshot>& windows = stateStore_.MutableSnapshot().windows;
+    const WindowSnapshot* stored = FindWindowSnapshot(windows, hwnd);
+    if (stored == nullptr) {
+        WindowSnapshot snapshot = windowHider_.SnapshotWindow(hwnd);
+        const AppRule* rule = ruleStore_.MatchByPid(pid);
+        snapshot.taskbarTabRemoved = TRUE;
+        snapshot.altTabSuppressed =
+            ((rule != nullptr) && rule->actions.hideFromAltTab) ? TRUE : FALSE;
+        windows.push_back(snapshot);
+        if (!stateFile_.empty()) {
+            stateStore_.Persist(EffectiveStateFile());
+        }
+        stored = &windows.back();
+    }
+
+    // The target app re-showed its own (top-level) window: hide it again.
+    // ApplyHide is the paired counterpart of RestoreWindow -- it also removes
+    // the taskbar button and re-inserts WS_EX_TOOLWINDOW, so a window that
+    // came back on its own is suppressed exactly like the ones hidden by
+    // HideAll.
+    windowHider_.ApplyHide(*stored);
 }
 
 }  // namespace core

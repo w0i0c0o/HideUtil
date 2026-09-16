@@ -65,9 +65,24 @@ void WinEventHook::OnWinEvent(HWND hwnd, LONG idObject) {
     if (std::find(pids_.begin(), pids_.end(), pid) == pids_.end()) {
         return;
     }
+    // Never re-hide a child window. See ShouldRehideWindow for the full
+    // rationale: hiding a child pane of a composite UI (Excel's ribbon is the
+    // motivating case) silently destroys it for good, because children are
+    // never part of the snapshot and therefore never restored.
+    if (!ShouldRehideWindow(hwnd, GetAncestor(hwnd, GA_ROOT))) {
+        return;
+    }
     if (callback_) {
         callback_(hwnd, pid);
     }
+}
+
+bool ShouldRehideWindow(HWND hwnd, HWND rootAncestor) {
+    if (hwnd == nullptr || rootAncestor == nullptr) {
+        // nullptr hwnd, and a destroyed window (GetAncestor returns nullptr).
+        return false;
+    }
+    return hwnd == rootAncestor;
 }
 
 }  // namespace core

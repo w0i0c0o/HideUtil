@@ -10,6 +10,8 @@
 //   --settings-dump       print the effective config (hotkeys + rules)
 //   --targets [filter]    list selectable target programs (windows / tray / processes),
 //                         i.e. exactly what the settings picker shows
+//   --wintree <exe|pid>   dump the full window tree (children included) of a
+//                         process: visibility / style / geometry for every pane
 #include "core/AppRuleStore.h"
 #include "core/HideOrchestrator.h"
 #include "core/ProcessWindowResolver.h"
@@ -19,6 +21,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -72,7 +75,8 @@ void PrintUsage() {
         "  hideutil_cli --resume\n"
         "  hideutil_cli --status\n"
         "  hideutil_cli --settings-dump\n"
-        "  hideutil_cli --targets [filter]\n");
+        "  hideutil_cli --targets [filter]\n"
+        "  hideutil_cli --wintree <exeName|pid>\n");
 }
 
 void CommandList(ProcessWindowResolver& resolver) {
@@ -232,6 +236,142 @@ int CommandTargets(const ProcessWindowResolver& resolver, const std::wstring& fi
     return 0;
 }
 
+// ---- --wintree: full recursive window-tree dump for one process ----------
+//
+// Diagnostic tool for composite UIs (Office ribbon, IDE docks). It prints
+// EVERY window of the target process -- children included -- with visibility,
+// style and geometry, so "which pane disappeared after hide/restore" can be
+// answered by diffing two dumps instead of guessing.
+
+struct WinTreeContext {
+    std::vector<DWORD> pids;
+    int dumped = 0;
+};
+
+bool WinTreePidMatches(const WinTreeContext& ctx, DWORD pid) {
+    for (DWORD candidate : ctx.pids) {
+        if (candidate == pid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void DumpWindowNode(HWND hwnd, int depth) {
+    wchar_t className[256] = {};
+    GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
+    wchar_t title[256] = {};
+    GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+
+    RECT rect{};
+    GetWindowRect(hwnd, &rect);
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    const BOOL visible = IsWindowVisible(hwnd);
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    // Matches the re-hide policy: only the root of a window tree is ever
+    // touched by the EVENT_OBJECT_SHOW watchdog.
+    const bool rehiddable = (root == hwnd);
+
+    std::wstring indent(static_cast<std::size_t>(depth) * 2, L' ');
+    wchar_t line[1024] = {};
+    swprintf_s(line,
+               L"%ls%ls0x%-14p vis=%d rehide=%d style=0x%08X ex=0x%08X "
+               L"rect=(%ld,%ld,%ld,%ld) [%3ldx%3ld] class=%-24ls %ls",
+               indent.c_str(), depth == 0 ? L"ROOT " : L"  +- ", hwnd, visible,
+               rehiddable ? 1 : 0, static_cast<unsigned>(style),
+               static_cast<unsigned>(exStyle), rect.left, rect.top, rect.right, rect.bottom,
+               rect.right - rect.left, rect.bottom - rect.top, className, title);
+    OutLine(line);
+}
+
+// Direct children only. EnumChildWindows would return ALL descendants, which
+// duplicates every pane once per ancestor when combined with recursion.
+void DumpChildrenRecursive(HWND parent, int depth) {
+    for (HWND child = GetWindow(parent, GW_CHILD); child != nullptr;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        DumpWindowNode(child, depth);
+        DumpChildrenRecursive(child, depth + 1);
+    }
+}
+
+BOOL CALLBACK WinTreeEnumProc(HWND hwnd, LPARAM lParam) {
+    WinTreeContext* ctx = reinterpret_cast<WinTreeContext*>(lParam);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0 || !WinTreePidMatches(*ctx, pid)) {
+        return TRUE;
+    }
+    ++ctx->dumped;
+    DumpWindowNode(hwnd, 0);
+    DumpChildrenRecursive(hwnd, 1);
+    return TRUE;
+}
+
+// First pass: collect the pids whose image name contains `wanted`.
+// EnumWindows covers top-level windows whether or not they are visible, so a
+// target that is currently HIDDEN is still matched.
+struct PidCollectContext {
+    std::wstring wanted;
+    std::vector<DWORD> pids;
+};
+
+BOOL CALLBACK PidCollectProc(HWND hwnd, LPARAM lParam) {
+    PidCollectContext* ctx = reinterpret_cast<PidCollectContext*>(lParam);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0) {
+        return TRUE;
+    }
+    for (DWORD seen : ctx->pids) {
+        if (seen == pid) {
+            return TRUE;
+        }
+    }
+    const std::wstring base = hideutil::core::ToLowerCopy(
+        ProcessWindowResolver::GetProcessBaseName(
+            ProcessWindowResolver::GetProcessImagePath(pid)));
+    if (base.find(ctx->wanted) != std::wstring::npos) {
+        ctx->pids.push_back(pid);
+    }
+    return TRUE;
+}
+
+int CommandWinTree(const std::wstring& filter) {
+    if (filter.empty()) {
+        OutLine(L"wintree: missing argument (process image name or pid)");
+        return 1;
+    }
+    WinTreeContext ctx;
+    // Accept a numeric pid ...
+    const DWORD asPid = static_cast<DWORD>(_wtoi(filter.c_str()));
+    if (asPid != 0) {
+        ctx.pids.push_back(asPid);
+    }
+    // ... and/or an image-name match, so "EXCEL.EXE" works too (and still
+    // matches while the target is hidden).
+    PidCollectContext collect;
+    collect.wanted = hideutil::core::ToLowerCopy(filter);
+    EnumWindows(PidCollectProc, reinterpret_cast<LPARAM>(&collect));
+    for (DWORD pid : collect.pids) {
+        if (!WinTreePidMatches(ctx, pid)) {
+            ctx.pids.push_back(pid);
+        }
+    }
+
+    if (ctx.pids.empty()) {
+        OutLine(L"wintree: no running process matches '" + filter + L"'");
+        return 2;
+    }
+    OutLine(L"window tree for '" + filter + L"' (vis=IsWindowVisible, rehide=root of window tree)");
+    EnumWindows(WinTreeEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    if (ctx.dumped == 0) {
+        OutLine(L"wintree: no window found for the matched pid(s)");
+        return 2;
+    }
+    return 0;
+}
+
 int RunCommand(int argc, wchar_t** argv) {
     AppRuleStore store;
     StateStore stateStore;
@@ -267,6 +407,10 @@ int RunCommand(int argc, wchar_t** argv) {
     }
     if (command == L"--targets") {
         return CommandTargets(resolver, argc >= 3 ? argv[2] : L"");
+    }
+    if (command == L"--wintree") {
+        if (argc < 3) { PrintUsage(); return 1; }
+        return CommandWinTree(argv[2]);
     }
     PrintUsage();
     return 1;

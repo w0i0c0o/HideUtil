@@ -10,12 +10,14 @@
 #include "core/ProcessWindowResolver.h"
 #include "core/StateStore.h"
 #include "core/TargetEnumerator.h"
+#include "core/WinEventHook.h"
 #include "self/HotkeyManager.h"
 #include "self/InstanceHandoff.h"
 
 #include <windows.h>
 
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1510,6 +1512,134 @@ void TestUnresponsivePromptWording() {
     CHECK(withPath.find(L"D:\\old\\HideUtil.exe") != std::wstring::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Re-hide policy (EVENT_OBJECT_SHOW watchdog).
+//
+// The watchdog must only ever touch top-level windows. Hiding a CHILD pane of
+// a composite UI (Excel's ribbon is the motivating case: Office rebuilds and
+// re-shows NetUIHWND / MsoCommandBarDock panes whenever the frame changes)
+// destroys that pane for good -- while the parent is hidden the loss is
+// invisible, and because only top-level windows are snapshotted, a hidden
+// child has no restore path at all.
+// ---------------------------------------------------------------------------
+
+LRESULT CALLBACK TestWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+HWND CreateProbeWindow(const wchar_t* className, DWORD style, HWND parent) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = TestWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = className;
+    // Registering twice is harmless; the error just means it already exists.
+    RegisterClassW(&wc);
+    return CreateWindowExW(0, className, L"HideUtilTest", style, 0, 0, 200, 120, parent,
+                           nullptr, GetModuleHandleW(nullptr), nullptr);
+}
+
+// Bounded message pump: out-of-context WinEvent callbacks are delivered to the
+// installing thread's message queue, so we must pump to observe them.
+void PumpUntil(const std::function<bool()>& done, DWORD budgetMs) {
+    const DWORD start = GetTickCount();
+    MSG msg{};
+    while (GetTickCount() - start < budgetMs) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (done()) {
+            return;
+        }
+        Sleep(10);
+    }
+}
+
+void TestRehidePolicySkipsChildWindows() {
+    std::printf("-- re-hide policy: children are never re-hidden\n");
+
+    // Pure-function contract first (no window needed).
+    CHECK(!hideutil::core::ShouldRehideWindow(nullptr, nullptr));
+    CHECK(!hideutil::core::ShouldRehideWindow(nullptr, reinterpret_cast<HWND>(0x1000)));
+    CHECK(!hideutil::core::ShouldRehideWindow(reinterpret_cast<HWND>(0x1000), nullptr));
+
+    // Now with real windows: the policy must actually classify a real child as
+    // NOT re-hiddable and a real top-level window as re-hiddable.
+    HWND parent = CreateProbeWindow(L"HideUtilTestParent", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(parent != nullptr);
+    if (parent == nullptr) {
+        return;
+    }
+    HWND child = CreateProbeWindow(L"HideUtilTestChild", WS_CHILD | WS_VISIBLE, parent);
+    CHECK(child != nullptr);
+
+    if (child != nullptr) {
+        // Sanity: the child really is a child in the Win32 sense.
+        CHECK(GetParent(child) == parent);
+        CHECK(GetAncestor(child, GA_ROOT) == parent);
+        CHECK(GetAncestor(parent, GA_ROOT) == parent);
+
+        CHECK(!hideutil::core::ShouldRehideWindow(child, GetAncestor(child, GA_ROOT)));
+        CHECK(hideutil::core::ShouldRehideWindow(parent, GetAncestor(parent, GA_ROOT)));
+        DestroyWindow(child);
+    }
+    DestroyWindow(parent);
+}
+
+void TestWinEventHookFiltersChildShow() {
+    std::printf("-- win event hook: EVENT_OBJECT_SHOW on a child is ignored\n");
+
+    HWND topLevel = CreateProbeWindow(L"HideUtilTestTop2", WS_OVERLAPPEDWINDOW, nullptr);
+    HWND child = nullptr;
+    if (topLevel != nullptr) {
+        child = CreateProbeWindow(L"HideUtilTestChild2", WS_CHILD, topLevel);
+    }
+    if (topLevel == nullptr || child == nullptr) {
+        CHECK(topLevel != nullptr);
+        CHECK(child != nullptr);
+        if (child != nullptr) DestroyWindow(child);
+        if (topLevel != nullptr) DestroyWindow(topLevel);
+        return;
+    }
+
+    const DWORD selfPid = GetCurrentProcessId();
+    std::vector<HWND> shown;
+    hideutil::core::WinEventHook hook;
+    const bool installed = hook.Install({selfPid}, [&shown](HWND hwnd, DWORD) {
+        shown.push_back(hwnd);
+    });
+    CHECK(installed);
+    if (!installed) {
+        DestroyWindow(child);
+        DestroyWindow(topLevel);
+        return;
+    }
+
+    // 1. Showing a CHILD window must NOT reach the callback.
+    ShowWindow(child, SW_SHOW);
+    PumpUntil([] { return false; }, 400);
+    bool childReported = false;
+    for (HWND hwnd : shown) {
+        if (hwnd == child) childReported = true;
+    }
+    CHECK(!childReported);
+
+    // 2. Showing a TOP-LEVEL window MUST still reach the callback (the
+    //    watchdog keeps working for real windows).
+    shown.clear();
+    ShowWindow(topLevel, SW_SHOW);
+    PumpUntil([&shown] { return !shown.empty(); }, 3000);
+    bool topReported = false;
+    for (HWND hwnd : shown) {
+        if (hwnd == topLevel) topReported = true;
+    }
+    CHECK(topReported);
+
+    hook.Uninstall();
+    DestroyWindow(child);
+    DestroyWindow(topLevel);
+}
+
 }  // namespace
 
 int wmain() {
@@ -1549,6 +1679,8 @@ int wmain() {
     TestLastInstanceMarkerRoundTrip();
     TestUnresponsivePromptWording();
     TestRejectedSwitchMessage();
+    TestRehidePolicySkipsChildWindows();
+    TestWinEventHookFiltersChildShow();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,
