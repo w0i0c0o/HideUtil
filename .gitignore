@@ -1,0 +1,30 @@
+# ---- Build artifacts ----
+/build/
+/out/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.lib
+*.pdb
+*.exe
+
+# ---- QA harness build output (rebuilt, not committed) ----
+build_qa/bin/
+
+# ---- Temp / verification output ----
+build_log.txt
+test_out.txt
+*.log
+
+# ---- Editor / IDE ----
+.vs/
+.idea/
+*.user
+
+# ---- Local agent / tool data (not source) ----
+.workbuddy/
+
+# ---- OS / misc ----
+NVIDIA Corporation/
+Thumbs.db
+Desktop.ini

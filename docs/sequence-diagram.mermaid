@@ -1,0 +1,81 @@
+%% 一键隐藏/恢复工具 —— 核心流程时序图
+
+%% ============ ① 隐藏流程 ============
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant HK as HotkeyManager
+    participant MSG as MessageOnlyWindow
+    participant ORC as HideOrchestrator
+    participant RSLV as ProcessWindowResolver
+    participant ST as StateStore
+    participant WH as WindowHider
+    participant TH as TrayIconHider
+    participant AM as AudioMuter
+    participant PC as ProcessController
+    participant WM as ProcessWatcher
+
+    U->>HK: 按下 Ctrl+Alt+F12
+    HK->>MSG: WM_HOTKEY(id)
+    MSG->>ORC: HideAll()
+    Note over ORC: 状态机 VISIBLE -> HIDING
+    ORC->>RSLV: resolveTargets(rules)
+    RSLV-->>ORC: 目标 PID/HWND 列表
+    ORC->>ST: beginSnapshot()
+    loop 每个目标窗口
+        ORC->>WH: snapshotWindow(hwnd)
+        WH->>ST: 记录 WindowSnapshot
+    end
+    loop 每个目标音频会话
+        ORC->>AM: snapshotSession(pid)
+        AM->>ST: 记录 AudioSnapshot
+    end
+    ORC->>WH: applyHide()
+    WH->>WH: ShowWindow(SW_HIDE)
+    WH->>WH: ITaskbarList::DeleteTab
+    WH->>WH: WS_EX_TOOLWINDOW
+    ORC->>TH: applyHide()
+    ORC->>AM: muteSessions()
+    ORC->>AM: registerSessionNotification()
+    ORC->>WH: installWinEventHook(EVENT_OBJECT_SHOW)
+    opt suspendProcess = true
+        ORC->>PC: suspend(pid)
+    end
+    ORC->>WM: startWatch()
+    ORC->>ST: commitSnapshot(GlobalSnapshot)
+    Note over ORC: 状态机 HIDING -> HIDDEN
+
+%% ============ ② 恢复流程 ============
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant HK as HotkeyManager
+    participant MSG as MessageOnlyWindow
+    participant ORC as HideOrchestrator
+    participant WM as ProcessWatcher
+    participant AM as AudioMuter
+    participant PC as ProcessController
+    participant WH as WindowHider
+    participant ST as StateStore
+
+    U->>HK: 再次按下 Ctrl+Alt+F12
+    HK->>MSG: WM_HOTKEY(id)
+    MSG->>ORC: RestoreAll()
+    Note over ORC: 状态机 HIDDEN -> RESTORING
+    ORC->>WM: stopWatch()
+    ORC->>AM: unregisterSessionNotification()
+    ORC->>AM: restoreSessions()
+    opt 曾挂起进程
+        ORC->>PC: resume(pid)
+    end
+    ORC->>ST: loadSnapshot()
+    ST-->>ORC: GlobalSnapshot
+    loop 每个 WindowSnapshot
+        ORC->>WH: restoreWindow(snapshot)
+        WH->>WH: 还原 GWL_STYLE/GWL_EXSTYLE
+        WH->>WH: ShowWindow + SetWindowPlacement
+        WH->>WH: ITaskbarList::AddTab
+    end
+    ORC->>WH: uninstallWinEventHook()
+    ORC->>ST: clearSnapshot()
+    Note over ORC: 状态机 RESTORING -> VISIBLE

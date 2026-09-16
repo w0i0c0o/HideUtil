@@ -1,0 +1,167 @@
+classDiagram
+    class HideOrchestrator {
+        -HideState state
+        -AppRuleStore* ruleStore
+        -StateStore* stateStore
+        -ProcessWindowResolver* resolver
+        +HideAll() bool
+        +RestoreAll() bool
+        +OnTargetProcessStarted(pid, name) void
+        +OnWindowShown(hwnd, pid) void
+    }
+
+    class AppRuleStore {
+        -vector~AppRule~ rules
+        -HotkeyConfig hotkey
+        +Load(path) bool
+        +Save(path) bool
+        +MatchByPid(pid) AppRule*
+        +MatchByExe(name) AppRule*
+        +GetHotkey() HotkeyConfig
+    }
+
+    class StateStore {
+        -GlobalSnapshot snapshot
+        +BeginSnapshot() void
+        +AddWindow(WindowSnapshot) void
+        +AddAudio(AudioSnapshot) void
+        +AddProcess(ProcessSnapshot) void
+        +Commit() void
+        +Load() GlobalSnapshot
+        +Clear() void
+        +Persist(path) bool
+    }
+
+    class ProcessWindowResolver {
+        -map~DWORD,HWND~ pidToWindows
+        +ResolveTargets(rules) vector~WindowRef~
+        +CollectWindowsForPid(pid) vector~HWND~
+        +CollectOwnedPopups(hwnd) vector~HWND~
+        +IsUwpFrame(hwnd) bool
+    }
+
+    class WindowHider {
+        +SnapshotWindow(hwnd) WindowSnapshot
+        +ApplyHide(windows) bool
+        +RestoreWindow(WindowSnapshot) bool
+        +RemoveTaskbarTab(hwnd) void
+        +AddTaskbarTab(hwnd) void
+        +SetToolWindow(hwnd, enable) void
+    }
+
+    class TrayIconHider {
+        +ApplyHide(pid) bool
+        +Restore(pid) bool
+        -locateNotifyToolbar() HWND
+    }
+
+    class AudioMuter {
+        -IAudioSessionManager2* mgr
+        +SnapshotSession(pid) AudioSnapshot
+        +MuteSessions(pid) bool
+        +RestoreSessions(snapshot) bool
+        +RegisterSessionNotification() void
+        +UnregisterSessionNotification() void
+    }
+
+    class ProcessController {
+        +Suspend(pid) bool
+        +Resume(pid) bool
+    }
+
+    class VirtualDesktopMover {
+        +MoveToNewDesktop(hwnd) bool
+        +RestoreWindow(hwnd) bool
+    }
+
+    class JumpListCleaner {
+        +ClearAll() void
+    }
+
+    class WinEventHook {
+        +Install(pidFilter) bool
+        +Uninstall() void
+    }
+
+    class ProcessWatcher {
+        -thread worker
+        +Start(callback) bool
+        +Stop() void
+    }
+
+    class SelfShell {
+        +Run() int
+        -createMessageOnlyWindow() HWND
+    }
+
+    class HotkeyManager {
+        -HOTKEY_ID id
+        +Register(hotkey) bool
+        +Unregister() void
+        +IsConflict() bool
+    }
+
+    class SettingsWindow {
+        +ShowModal() void
+        +Destroy() void
+    }
+
+    class AppRule {
+        +string id
+        +string name
+        +MatchSpec match
+        +ActionSpec actions
+        +RestoreSpec restore
+    }
+
+    class WindowSnapshot {
+        +HWND hwnd
+        +DWORD pid
+        +BOOL wasVisible
+        +LONG_PTR prevStyle
+        +LONG_PTR prevExStyle
+        +WINDOWPLACEMENT placement
+        +BOOL wasForeground
+    }
+
+    class AudioSnapshot {
+        +string sessionId
+        +DWORD pid
+        +BOOL wasMuted
+        +float prevVolume
+    }
+
+    class ProcessSnapshot {
+        +DWORD pid
+        +BOOL wasSuspended
+    }
+
+    class GlobalSnapshot {
+        +time_point hiddenAt
+        +vector~WindowSnapshot~ windows
+        +vector~AudioSnapshot~ audio
+        +vector~ProcessSnapshot~ processes
+    }
+
+    HideOrchestrator --> AppRuleStore : uses
+    HideOrchestrator --> StateStore : uses
+    HideOrchestrator --> ProcessWindowResolver : uses
+    HideOrchestrator --> WindowHider : delegates
+    HideOrchestrator --> TrayIconHider : delegates
+    HideOrchestrator --> AudioMuter : delegates
+    HideOrchestrator --> ProcessController : delegates
+    HideOrchestrator --> VirtualDesktopMover : delegates
+    HideOrchestrator --> JumpListCleaner : delegates
+    HideOrchestrator --> WinEventHook : installs
+    HideOrchestrator --> ProcessWatcher : monitors
+    SelfShell --> HotkeyManager : owns
+    SelfShell --> HideOrchestrator : owns
+    SettingsWindow --> AppRuleStore : edits
+    AppRuleStore "1" o-- "many" AppRule : contains
+    StateStore --> GlobalSnapshot : holds
+    GlobalSnapshot "1" *-- "many" WindowSnapshot : contains
+    GlobalSnapshot "1" *-- "many" AudioSnapshot : contains
+    GlobalSnapshot "1" *-- "many" ProcessSnapshot : contains
+    WindowHider ..> WindowSnapshot : creates
+    AudioMuter ..> AudioSnapshot : creates
+    ProcessController ..> ProcessSnapshot : creates

@@ -1,0 +1,58 @@
+#!/bin/sh
+# Pre-commit hook: gate every commit on a clean build + passing tests.
+# scripts/build.sh injects the MSVC / Windows SDK / CMake environment itself,
+# so no external PATH setup is required before running this hook.
+#
+# Every step is wrapped in `timeout` so the hook can never hang a commit:
+#   * the build hangs if HideUtil.exe is running, because the linker cannot
+#     overwrite build/HideUtil.exe (observed: silent 19-minute stall);
+#   * hideutil_tests.exe creates real windows and can hang when the session is
+#     not interactive (observed: hung >5 minutes inside this hook).
+# A timeout exits 124, which is non-zero, so the commit is aborted with a
+# clear message instead of blocking forever.
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+BUILD_TIMEOUT=300
+TEST_TIMEOUT=180
+
+echo "[pre-commit] 1/3 Building (Release, timeout ${BUILD_TIMEOUT}s)..."
+timeout "$BUILD_TIMEOUT" bash scripts/build.sh Release || {
+    status=$?
+    if [ "$status" = 124 ]; then
+        echo "[pre-commit] Build TIMED OUT. Is HideUtil.exe still running?"
+        echo "[pre-commit] It locks build/HideUtil.exe and stalls the linker. Close it and retry."
+    else
+        echo "[pre-commit] Build failed (exit $status). See output above."
+    fi
+    echo "[pre-commit] Commit aborted."
+    exit 1
+}
+
+echo "[pre-commit] 2/3 Running unit tests (hideutil_tests, timeout ${TEST_TIMEOUT}s)..."
+timeout "$TEST_TIMEOUT" build/hideutil_tests.exe || {
+    status=$?
+    if [ "$status" = 124 ]; then
+        echo "[pre-commit] Unit tests TIMED OUT (the test process hung)."
+    else
+        echo "[pre-commit] Unit tests failed (exit $status). See output above."
+    fi
+    echo "[pre-commit] Commit aborted."
+    exit 1
+}
+
+echo "[pre-commit] 3/3 Running independent QA tests (hideutil_qa_tests, timeout ${TEST_TIMEOUT}s)..."
+timeout "$TEST_TIMEOUT" build/hideutil_qa_tests.exe || {
+    status=$?
+    if [ "$status" = 124 ]; then
+        echo "[pre-commit] QA tests TIMED OUT (the test process hung)."
+    else
+        echo "[pre-commit] QA tests failed (exit $status). See output above."
+    fi
+    echo "[pre-commit] Commit aborted."
+    exit 1
+}
+
+echo "[pre-commit] All checks passed."

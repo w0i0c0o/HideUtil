@@ -1,0 +1,324 @@
+#include "self/SelfShell.h"
+
+#include "core/TargetEnumerator.h"
+#include "self/Logger.h"
+
+#include <commctrl.h>
+
+#include <cstdio>
+
+namespace hideutil {
+namespace self {
+
+namespace {
+
+const wchar_t* kMutexName = L"Local\\HideUtil_SingleInstance_Mutex";
+const wchar_t* kEventName = L"Local\\HideUtil_ShowSettings_Event";
+const wchar_t* kMessageName = L"HideUtil_ShowSettings";
+
+struct TargetStartedPayload {
+    DWORD pid = 0;
+    std::wstring name;
+};
+
+}  // namespace
+
+SelfShell* SelfShell::instance_ = nullptr;
+UINT SelfShell::showSettingsMessage_ = 0;
+
+const wchar_t* SelfShell::SingleInstanceMutexName() { return kMutexName; }
+const wchar_t* SelfShell::ShowSettingsEventName() { return kEventName; }
+const wchar_t* SelfShell::ShowSettingsMessageName() { return kMessageName; }
+
+SelfShell::SelfShell() : orchestrator_(ruleStore_, stateStore_, resolver_) {}
+
+SelfShell::~SelfShell() = default;
+
+int SelfShell::Run(HINSTANCE instance, bool showSettingsRequested) {
+    instance_ = this;
+    hinstance_ = instance;
+    showSettingsMessage_ = RegisterWindowMessageW(kMessageName);
+
+    INITCOMMONCONTROLSEX commonControls{};
+    commonControls.dwSize = sizeof(commonControls);
+    commonControls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&commonControls);
+
+    // Load (or create) the per-user configuration.
+    const std::wstring configPath = core::AppRuleStore::DefaultConfigPath();
+    ruleStore_.EnsureDefaultConfig(configPath);
+    ruleStore_.Load(configPath);
+
+    // Persist the snapshot to the standard state file. Without this a crash (or
+    // a forced kill) would leave the target windows hidden with no way back;
+    // with it, the next run or `hideutil_cli --restore` can still put them back.
+    orchestrator_.SetStateFile(core::StateStore::DefaultStatePath());
+
+    if (!CreateMessageWindow(instance)) {
+        Logger::Error(L"failed to create message-only window");
+        instance_ = nullptr;
+        return 1;
+    }
+
+    // Marshal the background watcher callback onto the UI thread.
+    orchestrator_.SetTargetStartedHandler([this](DWORD pid, const std::wstring& name) {
+        auto* payload = new TargetStartedPayload{pid, name};
+        if (!PostMessageW(hwnd_, kMsgTargetStarted, 0, reinterpret_cast<LPARAM>(payload))) {
+            delete payload;
+        }
+    });
+
+    RegisterHotkeys();
+    StartEventThread();
+
+    // Crash safety net: if the previous run was killed (or crashed) while
+    // targets were hidden, a leftover state.json exists. Restore everything
+    // right now so no window is left unrecoverable. RestoreAll is idempotent,
+    // never blocks on unresponsive targets and keeps anything it had to skip
+    // in the snapshot for the next retry.
+    if (orchestrator_.QueryPersistedState().hasSnapshot) {
+        Logger::Info(L"leftover snapshot detected; restoring previous state on startup");
+        orchestrator_.RestoreAll();
+    }
+
+    if (showSettingsRequested) {
+        ShowSettings();
+    }
+
+    MSG message{};
+    BOOL result = 0;
+    while ((result = GetMessageW(&message, nullptr, 0, 0)) != 0) {
+        if (result == -1) {
+            break;
+        }
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    StopEventThread();
+    settings_.Destroy();
+    hotkeys_.UnregisterAll(hwnd_);
+    if (hwnd_ != nullptr) {
+        DestroyWindow(hwnd_);
+        hwnd_ = nullptr;
+    }
+    instance_ = nullptr;
+    return 0;
+}
+
+bool SelfShell::CreateMessageWindow(HINSTANCE instance) {
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(WNDCLASSEXW);
+    windowClass.lpfnWndProc = &SelfShell::WndProc;
+    windowClass.hInstance = instance;
+    windowClass.lpszClassName = kWindowClassName;
+    if (RegisterClassExW(&windowClass) == 0) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+
+    // A message-only window: parent HWND_MESSAGE, never shown, not in the task
+    // bar, no tray icon, no console.
+    hwnd_ = CreateWindowExW(0, kWindowClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance,
+                            this);
+    return hwnd_ != nullptr;
+}
+
+void SelfShell::RegisterHotkeys() {
+    const core::HotkeyConfig& hotkeys = ruleStore_.Config().hotkey;
+    if (!hotkeys_.ReRegister(hwnd_, HotkeyManager::kHotkeyHideToggle, hotkeys.hideToggle)) {
+        if (hotkeys_.IsConflict(HotkeyManager::kHotkeyHideToggle)) {
+            Logger::Warn(L"hideToggle hotkey already registered by another application");
+        } else {
+            Logger::Warn(L"failed to register hideToggle hotkey");
+        }
+    }
+    if (!hotkeys_.ReRegister(hwnd_, HotkeyManager::kHotkeyOpenSettings, hotkeys.openSettings)) {
+        if (hotkeys_.IsConflict(HotkeyManager::kHotkeyOpenSettings)) {
+            Logger::Warn(L"openSettings hotkey already registered by another application");
+        } else {
+            Logger::Warn(L"failed to register openSettings hotkey");
+        }
+    }
+}
+
+bool SelfShell::ProbeHotkey(int slotId, const core::HotkeySpec& spec, bool* conflict) {
+    if (conflict != nullptr) {
+        *conflict = false;
+    }
+    const int tempId = 9000 + slotId;
+    if (hotkeys_.Register(hwnd_, tempId, spec)) {
+        hotkeys_.Unregister(hwnd_, tempId);
+        return true;
+    }
+    if (conflict != nullptr) {
+        *conflict = hotkeys_.IsConflict(tempId);
+    }
+    return false;
+}
+
+void SelfShell::ShowSettings() {
+    ui::SettingsHost host;
+    host.suspendHotkeys = [this]() { hotkeys_.UnregisterAll(hwnd_); };
+    host.resumeHotkeys = [this]() { RegisterHotkeys(); };
+    host.onConfigChanged = [this]() {
+        RegisterHotkeys();
+        // The orchestrator holds a reference to ruleStore_, so a re-load is
+        // immediate; re-register the hotkeys above to apply new combinations.
+    };
+    host.probeHotkey = [this](int slotId, const core::HotkeySpec& spec, bool* conflict) {
+        return ProbeHotkey(slotId, spec, conflict);
+    };
+    host.enumerateTargets = [this]() { return core::EnumerateTargetCandidates(resolver_); };
+    host.onQuitApp = [this]() { QuitApplication(); };
+    settings_.Show(hinstance_, ruleStore_, std::move(host));
+}
+
+void SelfShell::QuitApplication() {
+    // 1. Put everything back the way we found it (idempotent).
+    orchestrator_.RestoreAll();
+
+    // 2. Ask the persisted snapshot whether anything is still outstanding. A
+    //    successful restore deletes the state file, so whatever remains is
+    //    genuinely still hidden and could not be restored.
+    //
+    //    The warning fires ONLY when THIS session actually hid windows. A
+    //    state.json inherited from a previous crash / forced-exit (whose window
+    //    the startup auto-restore could not bring back) must not nag the user
+    //    on a quit where they hid nothing -- the recovery file is simply kept
+    //    for the next launch's auto-restore retry. If there are no genuine
+    //    leftovers at all, any stale state file is pruned so it cannot trigger
+    //    the reminder on a later launch.
+    const core::HideOrchestrator::PersistedStatus status = orchestrator_.QueryPersistedState();
+    const bool genuineLeftovers =
+        status.hasSnapshot && (status.windowCount > 0 || status.audioCount > 0);
+    if (hidThisSession_ && genuineLeftovers) {
+        wchar_t detail[320];
+        swprintf_s(detail,
+                   L"仍有 %zu 个窗口 / %zu 个音频会话未能恢复。\n\n"
+                   L"状态文件已保留：\n%%APPDATA%%\\HideUtil\\state.json\n\n"
+                   L"可再次运行 HideUtil.exe，或用 hideutil_cli.exe --restore 重试。",
+                   status.windowCount, status.audioCount);
+        MessageBoxW(settings_.Handle(), detail, L"退出 HideUtil", MB_OK | MB_ICONWARNING);
+    } else if (!genuineLeftovers) {
+        // Nothing is actually hidden any more (everything was restored, or the
+        // leftover entries were inert). Remove the stale state file so it does
+        // not produce a spurious reminder on a future launch.
+        DeleteFileW(core::StateStore::DefaultStatePath().c_str());
+    }
+
+    // 3. Tear down. The message loop in Run() performs the remaining cleanup
+    //    (settings window, hotkeys, message window, event thread).
+    PostQuitMessage(0);
+}
+
+void SelfShell::StartEventThread() {
+    if (eventThreadStarted_) {
+        return;
+    }
+    showSettingsEvent_ = CreateEventW(nullptr, FALSE, FALSE, kEventName);
+    quitEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (showSettingsEvent_ == nullptr || quitEvent_ == nullptr) {
+        return;
+    }
+    eventThreadStarted_ = true;
+    eventThread_ = std::thread(&SelfShell::EventThreadMain, this);
+}
+
+void SelfShell::StopEventThread() {
+    if (!eventThreadStarted_) {
+        return;
+    }
+    if (quitEvent_ != nullptr) {
+        SetEvent(quitEvent_);
+    }
+    if (eventThread_.joinable()) {
+        eventThread_.join();
+    }
+    if (showSettingsEvent_ != nullptr) {
+        CloseHandle(showSettingsEvent_);
+        showSettingsEvent_ = nullptr;
+    }
+    if (quitEvent_ != nullptr) {
+        CloseHandle(quitEvent_);
+        quitEvent_ = nullptr;
+    }
+    eventThreadStarted_ = false;
+}
+
+void SelfShell::EventThreadMain() {
+    HANDLE handles[2] = {showSettingsEvent_, quitEvent_};
+    while (true) {
+        const DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0) {
+            PostMessageW(hwnd_, showSettingsMessage_, 0, 0);
+        } else {
+            break;  // quitEvent_ or error
+        }
+    }
+}
+
+LRESULT CALLBACK SelfShell::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (instance_ != nullptr && showSettingsMessage_ != 0 && message == showSettingsMessage_) {
+        instance_->ShowSettings();
+        return 0;
+    }
+    switch (message) {
+        case WM_HOTKEY:
+            if (instance_ != nullptr) {
+                instance_->OnHotkey(static_cast<int>(wParam));
+            }
+            return 0;
+        case SelfShell::kMsgTargetStarted:
+            if (instance_ != nullptr) {
+                instance_->OnTargetStartedMessage(lParam);
+            }
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        default:
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+}
+
+void SelfShell::OnTargetStartedMessage(LPARAM lParam) {
+    auto* payload = reinterpret_cast<TargetStartedPayload*>(lParam);
+    if (payload == nullptr) {
+        return;
+    }
+    orchestrator_.OnTargetProcessStarted(payload->pid, payload->name);
+    delete payload;
+}
+
+void SelfShell::OnHotkey(int id) {
+    switch (id) {
+        case HotkeyManager::kHotkeyHideToggle:
+            if (orchestrator_.GetState() == core::HideOrchestrator::State::Hidden) {
+                // Manual restore: the hide->restore cycle is closed. Clear the
+                // flag so a state.json inherited from a PREVIOUS crashed session
+                // (which the startup auto-restore could not bring back) does not
+                // keep this session "sticky" and fire a spurious quit warning.
+                orchestrator_.RestoreAll();
+                hidThisSession_ = false;
+            } else {
+                // Only mark the session as having hidden something when a hide
+                // actually engaged (HideAll returns true). A no-match hotkey
+                // press must not arm the quit warning.
+                if (orchestrator_.HideAll()) {
+                    hidThisSession_ = true;
+                }
+            }
+            break;
+        case HotkeyManager::kHotkeyOpenSettings:
+            ShowSettings();
+            break;
+        default:
+            break;
+    }
+}
+
+}  // namespace self
+}  // namespace hideutil
