@@ -112,8 +112,24 @@ WindowOpResult WindowHider::ApplyHide(const WindowSnapshot& snapshot) {
     if (snapshot.altTabSuppressed) {
         SetToolWindow(snapshot.hwnd, true);
     }
-    // ShowWindowAsync: never sends messages synchronously across threads.
-    ShowWindowAsync(snapshot.hwnd, SW_HIDE);
+    // Get the window off the screen by MINIMIZING it, not with SW_HIDE.
+    //
+    // SW_HIDE makes Office (Excel / Word) tear down its command-bar docks to
+    // reclaim resources: the MsoCommandBar and MsoWorkPane shells are
+    // destroyed, the ribbon's NUIPane is re-parented into a hidden 100x100
+    // "parking" pane, and the ribbon container loses WS_VISIBLE. Showing the
+    // window again does NOT rebuild any of it -- the ribbon stays gone until
+    // the application is restarted, and no amount of re-showing, resizing or
+    // Ctrl+F1 brings it back.
+    //
+    // Minimizing never triggers that teardown. Restoring a minimized Excel
+    // always brings the ribbon back -- that is the everyday user experience,
+    // and it is exactly the behaviour we need here. The window is still gone
+    // from the screen, its taskbar button is removed separately
+    // (RemoveTaskbarTab above) and it is kept out of Alt+Tab separately
+    // (WS_EX_TOOLWINDOW above), so nothing leaks.
+    //
+    ShowWindowAsync(snapshot.hwnd, SW_MINIMIZE);
     return WindowOpResult::Ok;
 }
 
@@ -143,6 +159,21 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
         AddTaskbarTab(snapshot.hwnd);
     }
 
+    // Was the window ALREADY minimized by the user before we hid it? That
+    // state lives in the snapshot (ResolveRestoreShowCmd preserves it) and
+    // must be left alone below.
+    const bool userHadMinimized = (snapshot.placement.showCmd == SW_SHOWMINIMIZED);
+
+    // Undo the minimization ApplyHide applied, BEFORE the geometry is pinned
+    // down. Going through SW_RESTORE (instead of letting SetWindowPlacement do
+    // everything) matters: it is the normal "put the window back" path, so the
+    // application gets its WM_SHOWWINDOW / WM_SIZE sequence and rebuilds any
+    // UI it parked while hidden -- Office in particular restores its ribbon
+    // and status bar docks this way.
+    if (snapshot.wasVisible && !userHadMinimized && IsIconic(snapshot.hwnd)) {
+        ShowWindow(snapshot.hwnd, SW_RESTORE);
+    }
+
     // SetWindowPlacement is the single source of truth for the recovered
     // geometry and show state. Its showCmd is the exact original state
     // captured at hide time (SW_SHOWNORMAL / SW_SHOWMAXIMIZED /
@@ -163,12 +194,13 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
         // Originally-hidden window: keep it hidden. The async hide is fine
         // here (the user does not see a transition).
         ShowWindowAsync(snapshot.hwnd, SW_HIDE);
-    } else if (IsIconic(snapshot.hwnd)) {
+    } else if (IsIconic(snapshot.hwnd) && !userHadMinimized) {
         // Belt and braces. If the window ended up minimized anyway (a placement
         // whose rcNormalPosition/ptMinPosition disagrees with its showCmd, or
         // an app that minimized itself while hidden), SW_RESTORE is the only
         // call that clears WS_MINIMIZE and puts it back at its real geometry --
         // SW_SHOW would leave the window minimized and off-screen.
+        // A window the user had minimized themselves stays minimized.
         ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
     // For the wasVisible==true path we deliberately do NOT issue

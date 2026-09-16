@@ -1712,6 +1712,73 @@ void TestRestoreNeverLeavesWindowMinimized() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// Hiding must MINIMIZE, never SW_HIDE.
+//
+// Office tears down its command-bar docks (ribbon / status bar) when its main
+// window is hidden with SW_HIDE: MsoCommandBar + MsoWorkPane are destroyed and
+// the ribbon's NUIPane is re-parented into a hidden 100x100 parking pane.
+// Showing the window again does not rebuild any of it. Minimizing does not
+// trigger the teardown, and restoring a minimized window always brings the
+// ribbon back.
+// ---------------------------------------------------------------------------
+
+void TestHideMinimizesRatherThanHides() {
+    std::printf("-- hide: minimizes instead of SW_HIDE, and restore undoes it\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestMinimize", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
+    CHECK(snapshot.wasVisible == TRUE);
+
+    // Hide. The window must be minimized, NOT destroyed-in-UI (SW_HIDE):
+    // IsWindowVisible stays TRUE for a minimized window.
+    CHECK(hider.ApplyHide(snapshot) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return IsIconic(window); }, 2000);
+    CHECK(IsIconic(window));
+    CHECK(IsWindowVisible(window) == TRUE);
+
+    // Restore brings it fully back.
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window) == TRUE);
+    CHECK((GetWindowLongPtrW(window, GWL_STYLE) & WS_MINIMIZE) == 0);
+
+    DestroyWindow(window);
+}
+
+void TestRestoreKeepsUserMinimizedWindow() {
+    std::printf("-- restore: a window the user minimized stays minimized\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestUserMin", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    // Snapshot it while the USER has it minimized.
+    ShowWindow(window, SW_SHOWMINIMIZED);
+    PumpUntil([] { return false; }, 50);
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
+    // A user-minimized window is still "visible" in the Win32 sense.
+    CHECK(snapshot.wasVisible == TRUE);
+    CHECK(snapshot.placement.showCmd == SW_SHOWMINIMIZED);
+
+    // Restoring must NOT pop it open -- that would fight the user.
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    CHECK(IsIconic(window));
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -1755,6 +1822,8 @@ int wmain() {
     TestWinEventHookFiltersChildShow();
     TestResolveRestoreShowCmd();
     TestRestoreNeverLeavesWindowMinimized();
+    TestHideMinimizesRatherThanHides();
+    TestRestoreKeepsUserMinimizedWindow();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,
