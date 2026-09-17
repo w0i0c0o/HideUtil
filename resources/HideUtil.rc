@@ -1,0 +1,12 @@
+// Resource script for the HideUtil executables.
+//
+// Embeds the application icon so that Explorer, the taskbar, Alt+Tab and
+// Task Manager show it for our own binaries (the app is windowless by design,
+// so the exe icon and the settings window are the only branding surfaces).
+//
+// The icon is the user-supplied "fish-eye" artwork; it is referenced by a bare
+// filename, resolved through the include directory CMake passes for this
+// target (see target_include_directories(... resources) in CMakeLists.txt).
+#include "../src/ui/AppResources.h"
+
+IDI_APP_ICON ICON "fish-eye-icon.ico"

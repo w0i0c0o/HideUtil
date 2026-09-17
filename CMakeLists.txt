@@ -74,8 +74,12 @@ target_link_libraries(hideutil_core PUBLIC
 add_executable(HideUtil WIN32
     src/main.cpp
     app.manifest
+    resources/HideUtil.rc
 )
 
+# The resource script references the .ico by bare name and #includes the shared
+# resource header, so rc.exe needs resources/ on its include path.
+target_include_directories(HideUtil PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
 target_compile_options(HideUtil PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(HideUtil PRIVATE hideutil_core)
 # Fallback / reinforcement for the requireAdministrator manifest.
@@ -86,8 +90,10 @@ target_link_options(HideUtil PRIVATE "/MANIFESTUAC:level='requireAdministrator'"
 # ---------------------------------------------------------------------------
 add_executable(hideutil_cli
     src/cli/main_cli.cpp
+    resources/HideUtil.rc
 )
 
+target_include_directories(hideutil_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
 target_compile_options(hideutil_cli PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(hideutil_cli PRIVATE hideutil_core)
 target_link_options(hideutil_cli PRIVATE "/MANIFESTUAC:level='asInvoker'")

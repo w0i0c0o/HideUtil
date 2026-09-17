@@ -7,6 +7,12 @@
 # Output: resources/HideUtil.ico  (primary, blue)  and
 #         resources/HideUtil_dark.ico (dark variant)
 #         resources/HideUtil_preview.png / HideUtil_dark_preview.png (256 preview)
+#
+# ⚠️ SUPERSEDED: the application icon actually shipped (embedded by
+# resources/HideUtil.rc) is the user-supplied artwork
+# resources/fish-eye-icon.ico. The files this script writes are the original
+# programmatic draft, kept for reference only -- do NOT wire them up again, and
+# do not assume the .rc points at them.
 
 import struct
 import zlib

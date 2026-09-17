@@ -1,5 +1,6 @@
 #include "ui/SettingsWindow.h"
 
+#include "ui/AppResources.h"
 #include "ui/IconCache.h"
 
 #include "self/Logger.h"
@@ -13,6 +14,32 @@ namespace hideutil {
 namespace ui {
 
 namespace {
+
+// The application icon embedded by resources/HideUtil.rc. Loaded from the
+// running module, so it also works for hideutil_cli.exe; a module without the
+// resource (e.g. the test executables) simply gets nullptr and Windows falls
+// back to the default icon -- callers must tolerate that.
+HICON LoadAppIcon(HINSTANCE instance, int cx, int cy) {
+    return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, cx,
+                                         cy, LR_SHARED));
+}
+
+// Install the app icon on a window's title bar / taskbar / Alt+Tab entry.
+// Best-effort: ignored when the resource is unavailable.
+void ApplyAppIcon(HWND hwnd, HINSTANCE instance) {
+    if (hwnd == nullptr) {
+        return;
+    }
+    HICON big = LoadAppIcon(instance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    HICON small =
+        LoadAppIcon(instance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    if (big != nullptr) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+    }
+    if (small != nullptr) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+    }
+}
 
 // Group ids for the target picker list (grouped view requires comctl32 v6).
 enum : int {
@@ -399,6 +426,9 @@ void RegisterRuleEditorClass(HINSTANCE instance) {
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hIcon = LoadAppIcon(instance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm =
+        LoadAppIcon(instance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.lpszClassName = kRuleEditorClass;
     RegisterClassExW(&wc);
     registered = true;
@@ -595,6 +625,9 @@ void RegisterTargetPickerClass(HINSTANCE instance) {
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hIcon = LoadAppIcon(instance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm =
+        LoadAppIcon(instance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.lpszClassName = kTargetPickerClass;
     RegisterClassExW(&wc);
     registered = true;
@@ -827,6 +860,9 @@ void SettingsWindow::RegisterWindowClass(HINSTANCE instance) {
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hIcon = LoadAppIcon(instance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm =
+        LoadAppIcon(instance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.lpszClassName = ClassName();
     RegisterClassExW(&wc);
 }
@@ -930,6 +966,9 @@ bool SettingsWindow::Show(HINSTANCE instance, core::AppRuleStore& store, Setting
         s_instance_ = nullptr;
         return false;
     }
+    // Belt and braces on top of the class icon: the taskbar / Alt+Tab entry
+    // uses the window icon.
+    ApplyAppIcon(hwnd_, instance);
 
     // Create the controls and lay them out.
     CreateControls();
