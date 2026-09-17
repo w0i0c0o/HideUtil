@@ -2051,6 +2051,42 @@ void TestRestoreMaximizedWindowWithTransientFlag() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// A window hidden while MAXIMIZED must come back maximized -- not as a normal
+// window parked at rcNormalPosition. SetWindowPlacement(SW_SHOWMAXIMIZED) is
+// not honoured reliably for Office, so RestoreWindow re-asserts the maximized
+// state explicitly.
+// ---------------------------------------------------------------------------
+
+void TestRestoreKeepsMaximizedState() {
+    std::printf("-- restore: a window hidden while maximized comes back maximized\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestMaxKeep", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_MAXIMIZE);
+    PumpUntil([window] { return IsZoomed(window); }, 2000);
+    CHECK(IsZoomed(window));
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
+    CHECK(snapshot.placement.showCmd == SW_SHOWMAXIMIZED);
+    CHECK((snapshot.prevStyle & WS_MAXIMIZE) != 0);
+
+    CHECK(hider.ApplyHide(snapshot) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return IsIconic(window); }, 2000);
+    CHECK(IsIconic(window));
+
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return IsZoomed(window); }, 2000);
+    CHECK(!IsIconic(window));
+    CHECK(IsZoomed(window));
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -2101,6 +2137,7 @@ int wmain() {
     TestRestoreHiddenWindowIgnoresInvisiblePlacement();
     TestPlacementFlagsSanitized();
     TestRestoreMaximizedWindowWithTransientFlag();
+    TestRestoreKeepsMaximizedState();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

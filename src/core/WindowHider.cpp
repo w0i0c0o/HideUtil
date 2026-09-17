@@ -262,6 +262,13 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
             // off-screen (the "restored window vanished" failure).
             ShowWindow(snapshot.hwnd, SW_RESTORE);
         }
+        // SetWindowPlacement(SW_SHOWMAXIMIZED) is not honoured reliably for
+        // Office: the window comes back as a normal (restored) window parked
+        // at rcNormalPosition, losing the maximized state it had before being
+        // hidden. Re-assert the maximized state explicitly.
+        if (placement.showCmd == SW_SHOWMAXIMIZED && !IsZoomed(snapshot.hwnd)) {
+            ShowWindow(snapshot.hwnd, SW_MAXIMIZE);
+        }
     } else {
         // Originally-hidden window: it must simply stay hidden. Its captured
         // placement is deliberately NOT applied -- a minimized/hidden showCmd
