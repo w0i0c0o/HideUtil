@@ -58,6 +58,19 @@ UINT ResolveRestoreShowCmd(UINT showCmd, BOOL wasVisible, LONG_PTR prevStyle);
 // Pure function so it can be unit-tested without real windows.
 void SanitizePlacementFlags(WINDOWPLACEMENT& placement);
 
+// Temporarily disable DWM transitions for a window, so a programmatic
+// hide/restore does not play the system minimize / restore / maximize
+// animation. Call Suppress before the visibility-changing calls and Restore
+// once the whole batch has settled (the attribute is per-window).
+//
+// Best-effort by design: when DWM is unavailable (composition disabled, or a
+// session without composition) every call fails silently -- and there is
+// nothing to animate in that case anyway. These talk to DWM, not to the
+// target window's thread, but they are still issued only after the caller's
+// responsiveness probe, so a hung target can never block us.
+void SuppressWindowTransitions(HWND hwnd);
+void RestoreWindowTransitions(HWND hwnd);
+
 class WindowHider {
 public:
     WindowHider();

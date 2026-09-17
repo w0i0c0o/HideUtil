@@ -2087,6 +2087,36 @@ void TestRestoreKeepsMaximizedState() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// DWM transition suppression is best-effort: it must be safe with null /
+// destroyed handles and when DWM is unavailable (no composition), and it must
+// never leave the window unusable.
+// ---------------------------------------------------------------------------
+
+void TestTransitionSuppressionFailSoft() {
+    std::printf("-- transitions: suppression is best-effort and never breaks a window\n");
+    using hideutil::core::RestoreWindowTransitions;
+    using hideutil::core::SuppressWindowTransitions;
+
+    SuppressWindowTransitions(nullptr);
+    RestoreWindowTransitions(nullptr);
+
+    HWND window = CreateProbeWindow(L"HideUtilTestTransitions", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+
+    SuppressWindowTransitions(window);
+    RestoreWindowTransitions(window);
+    CHECK(IsWindow(window));
+    CHECK(IsWindowVisible(window));
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -2138,6 +2168,7 @@ int wmain() {
     TestPlacementFlagsSanitized();
     TestRestoreMaximizedWindowWithTransientFlag();
     TestRestoreKeepsMaximizedState();
+    TestTransitionSuppressionFailSoft();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

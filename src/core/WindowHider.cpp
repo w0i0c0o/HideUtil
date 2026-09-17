@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <dwmapi.h>
+
 namespace hideutil {
 namespace core {
 
@@ -86,6 +88,24 @@ void SanitizePlacementFlags(WINDOWPLACEMENT& placement) {
         placement.flags &= ~static_cast<UINT>(WPF_RESTORETOMAXIMIZED);
     }
 }
+
+namespace {
+
+// Best-effort DWM transition switch. Failures are ignored on purpose: when
+// DWM is unavailable there is no animation to suppress in the first place.
+void SetTransitionsDisabled(HWND hwnd, BOOL disabled) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+        return;
+    }
+    const BOOL value = disabled;
+    DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &value, sizeof(value));
+}
+
+}  // namespace
+
+void SuppressWindowTransitions(HWND hwnd) { SetTransitionsDisabled(hwnd, TRUE); }
+
+void RestoreWindowTransitions(HWND hwnd) { SetTransitionsDisabled(hwnd, FALSE); }
 
 WindowSnapshot WindowHider::SnapshotWindow(HWND hwnd) const {
     WindowSnapshot snapshot;
@@ -183,6 +203,12 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     if (!IsWindowResponsive(snapshot.hwnd)) {
         return WindowOpResult::Unresponsive;
     }
+    // Suppress the system's minimize / restore / maximize animation for this
+    // window before any visibility change, so the recovery plays no visible
+    // transition -- in particular the maximize re-assert further down would
+    // otherwise animate on every single restore. Reset by RestoreAll once the
+    // whole batch has settled (the attribute is per window and must not leak).
+    SuppressWindowTransitions(snapshot.hwnd);
     // Capture the window's REAL on-screen state BEFORE prevStyle is written
     // back below: a stale snapshot's prevStyle itself carries WS_MINIMIZE,
     // and applying it would make IsIconic start reporting TRUE even though

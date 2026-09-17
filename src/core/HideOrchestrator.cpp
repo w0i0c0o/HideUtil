@@ -455,6 +455,16 @@ bool HideOrchestrator::RestoreAll() {
         }
     }
 
+    // Every visibility change for this batch has been issued: re-enable DWM
+    // transitions on the windows we suppressed them for. The attribute is per
+    // window, so leaving it set would silently strip the user's normal
+    // minimize/restore animations on those windows forever.
+    for (const WindowSnapshot& window : restorable) {
+        if (window.hwnd != nullptr && IsWindow(window.hwnd)) {
+            RestoreWindowTransitions(window.hwnd);
+        }
+    }
+
     // Give the foreground back to the user when they did not ask for
     // bringToFront. SetWindowPlacement (WindowHider::RestoreWindow) has no
     // "no-activate" option -- unlike SetWindowPos(SWP_NOACTIVATE) or

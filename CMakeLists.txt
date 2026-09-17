@@ -65,6 +65,7 @@ target_link_libraries(hideutil_core PUBLIC
     shell32
     advapi32
     uuid
+    dwmapi
 )
 
 # ---------------------------------------------------------------------------
