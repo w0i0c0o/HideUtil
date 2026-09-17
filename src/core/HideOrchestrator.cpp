@@ -72,6 +72,40 @@ GlobalSnapshot DropDestroyedWindows(const GlobalSnapshot& base) {
     return kept;
 }
 
+// Drop persisted entries that claim a minimized/hidden show state while
+// their window is currently ON SCREEN (visible and not iconic). Such an
+// entry predates a cycle in which the user recovered the window themselves
+// (or an async SW_MINIMIZE raced a fast toggle and stranded the window);
+// keeping it verbatim would make the next restore re-minimize a window the
+// user can currently see -- the "restored window vanished" bug. The window
+// is re-snapshotted fresh by the normal new-window path in HideAll.
+// Narrow exception to the keep-verbatim rule: it only ever fires for a
+// window that is visible right now, so the wasVisible semantics of
+// genuinely hidden or minimized windows (which are invisible or iconic)
+// are unaffected.
+GlobalSnapshot DropStaleMinimizedEntries(const GlobalSnapshot& base) {
+    GlobalSnapshot kept;
+    kept.hiddenAt = base.hiddenAt;
+    kept.moveToVirtualDesktopApplied = base.moveToVirtualDesktopApplied;
+    kept.audio = base.audio;
+    kept.processes = base.processes;
+    kept.jumpListPids = base.jumpListPids;
+    for (const WindowSnapshot& window : base.windows) {
+        const bool claimsInvisible =
+            (window.placement.showCmd == SW_SHOWMINIMIZED) ||
+            (window.placement.showCmd == SW_MINIMIZE) ||
+            (window.placement.showCmd == SW_FORCEMINIMIZE) ||
+            (window.placement.showCmd == SW_HIDE);
+        const bool stale = claimsInvisible && window.hwnd != nullptr &&
+                           IsWindow(window.hwnd) && IsWindowVisible(window.hwnd) &&
+                           !IsIconic(window.hwnd);
+        if (!stale) {
+            kept.windows.push_back(window);
+        }
+    }
+    return kept;
+}
+
 }  // namespace
 
 HideOrchestrator::HideOrchestrator(AppRuleStore& ruleStore, StateStore& stateStore,
@@ -150,6 +184,11 @@ bool HideOrchestrator::HideAll() {
     //      instead of inheriting a stale wasVisible.
     GlobalSnapshot base = DropDestroyedWindows(LoadBaseSnapshot());
     base = StateStore::PruneStaleWindows(base, targets.windows);
+    // Third normalisation pass: drop entries whose claimed minimized/hidden
+    // state contradicts the window's current on-screen reality, so the
+    // keep-verbatim lookup below re-snapshots them fresh instead of
+    // preserving a phantom "user had minimized" state.
+    base = DropStaleMinimizedEntries(base);
     const bool haveBase = HasSnapshotContent(base);
 
     state_ = State::Hiding;

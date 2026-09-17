@@ -130,6 +130,25 @@ WindowOpResult WindowHider::ApplyHide(const WindowSnapshot& snapshot) {
     // (WS_EX_TOOLWINDOW above), so nothing leaks.
     //
     ShowWindowAsync(snapshot.hwnd, SW_MINIMIZE);
+    // Bounded verification: the minimize takes effect only when the target
+    // thread pumps. If the user toggles back to restore before that happens,
+    // RestoreWindow would restore the window and this stale SW_MINIMIZE
+    // would then land AFTER the restore -- orphaning a minimized window
+    // whose snapshot was already erased. Close that race by verifying the
+    // window actually reached its iconic state before returning (bounded,
+    // best-effort: on timeout the entry is still kept, and restore's
+    // belt-and-braces SW_RESTORE remains the safety net). Same-thread
+    // callers (the unit tests) pump on their own and are skipped.
+    DWORD targetThread = 0;
+    GetWindowThreadProcessId(snapshot.hwnd, &targetThread);
+    if (targetThread != 0 && targetThread != GetCurrentThreadId()) {
+        for (int i = 0; i < 60; ++i) {  // ~1.5s worst case
+            if (!IsWindow(snapshot.hwnd) || IsIconic(snapshot.hwnd)) {
+                break;
+            }
+            Sleep(25);
+        }
+    }
     return WindowOpResult::Ok;
 }
 
@@ -143,6 +162,13 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     if (!IsWindowResponsive(snapshot.hwnd)) {
         return WindowOpResult::Unresponsive;
     }
+    // Capture the window's REAL on-screen state BEFORE prevStyle is written
+    // back below: a stale snapshot's prevStyle itself carries WS_MINIMIZE,
+    // and applying it would make IsIconic start reporting TRUE even though
+    // the window is currently on screen -- which would defeat the
+    // stale-entry self-heal further down.
+    const bool iconicBeforeStyleRestore = IsIconic(snapshot.hwnd);
+    const LONG_PTR styleBeforeRestore = GetWindowLongPtrW(snapshot.hwnd, GWL_STYLE);
     // Restore the original styles first, then force a frame recalculation so
     // that WS_EX_TOOLWINDOW removal takes effect immediately. The liveness
     // probe above guarantees the target is pumping, so a synchronous
@@ -162,7 +188,20 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     // Was the window ALREADY minimized by the user before we hid it? That
     // state lives in the snapshot (ResolveRestoreShowCmd preserves it) and
     // must be left alone below.
-    const bool userHadMinimized = (snapshot.placement.showCmd == SW_SHOWMINIMIZED);
+    //
+    // Stale-entry self-heal: the entry claims the window was minimized when
+    // hidden, but the window is on screen RIGHT NOW (not iconic). Such an
+    // entry predates a cycle in which the user recovered the window
+    // themselves (or an async SW_MINIMIZE raced a fast toggle and stranded
+    // the window). Forcing SW_SHOWMINIMIZED back would minimize a window
+    // the user can currently see -- restore must NEVER make a visible
+    // window invisible.
+    const bool claimsMinimized = (snapshot.placement.showCmd == SW_SHOWMINIMIZED) ||
+                                 (snapshot.placement.showCmd == SW_MINIMIZE) ||
+                                 (snapshot.placement.showCmd == SW_FORCEMINIMIZE);
+    const bool staleMinimizedEntry = claimsMinimized && !iconicBeforeStyleRestore;
+    const bool userHadMinimized =
+        (snapshot.placement.showCmd == SW_SHOWMINIMIZED) && !staleMinimizedEntry;
 
     // Undo the minimization ApplyHide applied, BEFORE the geometry is pinned
     // down. Going through SW_RESTORE (instead of letting SetWindowPlacement do
@@ -183,12 +222,31 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     // would otherwise force on top of it.
     WINDOWPLACEMENT placement = snapshot.placement;
     placement.length = sizeof(WINDOWPLACEMENT);
-    // Defensive second pass: a snapshot written by an older build (or by a
-    // hide that raced with the app's frame rebuild) can still carry a bogus
-    // SW_SHOWMINIMIZED. Never let it minimize a window that was visible.
-    placement.showCmd =
-        ResolveRestoreShowCmd(placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
-    SetWindowPlacement(snapshot.hwnd, &placement);
+    if (staleMinimizedEntry) {
+        // Bypass ResolveRestoreShowCmd: its genuinelyMinimized test trusts
+        // prevStyle, which for a stale entry still carries WS_MINIMIZE and
+        // would keep returning SW_SHOWMINIMIZED. Resolve against the
+        // window's CURRENT style instead (captured before our own style
+        // write above).
+        placement.showCmd =
+            (styleBeforeRestore & WS_MAXIMIZE) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+    } else {
+        // Defensive second pass: a snapshot written by an older build (or by
+        // a hide that raced with the app's frame rebuild) can still carry a
+        // bogus SW_SHOWMINIMIZED. Never let it minimize a window that was
+        // visible.
+        placement.showCmd =
+            ResolveRestoreShowCmd(placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
+    }
+    // A window that is ALREADY in its snapshotted minimized state must not
+    // get the placement re-applied: SetWindowPlacement(SW_SHOWMINIMIZED +
+    // WPF_RESTORETOMAXIMIZED) on top of the restored prevStyle produces the
+    // desynced WS_MINIMIZE|WS_MAXIMIZE double-bit state observed in the
+    // field ("restored window vanished" at (-32000,-32000)).
+    const bool alreadyInSnapshottedState = userHadMinimized && iconicBeforeStyleRestore;
+    if (!alreadyInSnapshottedState) {
+        SetWindowPlacement(snapshot.hwnd, &placement);
+    }
 
     if (!snapshot.wasVisible) {
         // Originally-hidden window: keep it hidden. The async hide is fine

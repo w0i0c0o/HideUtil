@@ -1779,6 +1779,151 @@ void TestRestoreKeepsUserMinimizedWindow() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// A stale snapshot must NEVER minimize a window that is on screen right now.
+//
+// Field bug: a persisted entry claiming showCmd=SW_SHOWMINIMIZED (captured
+// while the window was stranded minimized by an earlier failed / raced
+// cycle) survived into a later restore. RestoreWindow trusted it, skipped
+// SW_RESTORE and re-applied SetWindowPlacement(SW_SHOWMINIMIZED +
+// WPF_RESTORETOMAXIMIZED) on top of the restored prevStyle -- producing the
+// desynced WS_MINIMIZE|WS_MAXIMIZE double-bit state and a "restored" window
+// parked at (-32000,-32000) with no taskbar button ("the whole window is
+// gone"). Restore must NEVER make a visible window invisible.
+// ---------------------------------------------------------------------------
+
+void TestRestoreNeverMinimizesVisibleWindow() {
+    std::printf("-- restore: stale minimized snapshot never minimizes a visible window\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestStaleMin", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+
+    // Craft the stale entry: it claims the window was minimized when hidden
+    // (showCmd + prevStyle + WPF_RESTORETOMAXIMIZED), but the window is
+    // actually on screen right now (visible, not iconic).
+    hideutil::core::WindowSnapshot snapshot;
+    snapshot.hwnd = window;
+    GetWindowThreadProcessId(window, &snapshot.pid);
+    snapshot.wasVisible = TRUE;
+    snapshot.prevStyle = (GetWindowLongPtrW(window, GWL_STYLE) | WS_MINIMIZE) &
+                         ~static_cast<LONG_PTR>(WS_MAXIMIZE);
+    snapshot.prevExStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    snapshot.placement.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(window, &snapshot.placement);
+    snapshot.placement.showCmd = SW_SHOWMINIMIZED;
+    snapshot.placement.flags = WPF_RESTORETOMAXIMIZED;
+    snapshot.placement.ptMinPosition.x = -32000;
+    snapshot.placement.ptMinPosition.y = -32000;
+
+    hideutil::core::WindowHider hider;
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return !IsIconic(window); }, 2000);
+
+    // The window is still on screen -- never demoted to the parking lot.
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window));
+
+    DestroyWindow(window);
+}
+
+// ---------------------------------------------------------------------------
+// HideAll must refresh a stale persisted entry whose claimed minimized state
+// contradicts the window's current on-screen reality, instead of keeping it
+// verbatim (which would make the next restore re-minimize a visible window).
+// ---------------------------------------------------------------------------
+
+void TestHideRefreshesStaleMinimizedSnapshot() {
+    std::printf("-- hide: refreshes a stale minimized snapshot entry\n");
+    using hideutil::core::AppRule;
+    using hideutil::core::AppRuleStore;
+    using hideutil::core::GlobalSnapshot;
+    using hideutil::core::HideOrchestrator;
+    using hideutil::core::MatchMode;
+    using hideutil::core::ProcessWindowResolver;
+    using hideutil::core::StateStore;
+    using hideutil::core::WindowSnapshot;
+
+    const std::wstring kStaleState = L"hideutil_test_stale_min_state.json";
+    DeleteFileW(kStaleState.c_str());  // start clean even after a prior run
+
+    HWND window = CreateProbeWindow(L"HideUtilTestStaleEntry", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+
+    // Persist a STALE entry claiming the window was minimized when hidden,
+    // while the window is on screen right now (the field-bug state).
+    {
+        StateStore store;
+        store.BeginSnapshot();
+        WindowSnapshot stale;
+        stale.hwnd = window;
+        stale.pid = GetCurrentProcessId();
+        stale.wasVisible = TRUE;
+        stale.prevStyle = (GetWindowLongPtrW(window, GWL_STYLE) | WS_MINIMIZE) &
+                          ~static_cast<LONG_PTR>(WS_MAXIMIZE);
+        stale.prevExStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        stale.placement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(window, &stale.placement);
+        stale.placement.showCmd = SW_SHOWMINIMIZED;
+        stale.placement.flags = WPF_RESTORETOMAXIMIZED;
+        store.AddWindow(stale);
+        store.Commit();
+        CHECK(store.Persist(kStaleState));
+    }
+
+    // A rule hiding the test process itself, so the resolver picks the probe.
+    AppRule rule;
+    rule.match.processName = L"hideutil_tests.exe";
+    rule.match.matchMode = MatchMode::Any;
+    rule.actions.hideWindow = true;
+
+    AppRuleStore ruleStore;
+    ruleStore.SetRules({rule});
+    ruleStore.MutableConfig().bringRestoredToFront = false;
+    StateStore stateStore;
+    ProcessWindowResolver resolver;
+    HideOrchestrator orchestrator(ruleStore, stateStore, resolver);
+    orchestrator.SetStateFile(kStaleState);
+
+    CHECK(orchestrator.HideAll());
+
+    // The stale entry was dropped and the window re-snapshotted fresh: the
+    // merged entry must no longer claim a minimized show state.
+    const GlobalSnapshot& merged = stateStore.Snapshot();
+    const WindowSnapshot* entry = nullptr;
+    for (const WindowSnapshot& item : merged.windows) {
+        if (item.hwnd == window) {
+            entry = &item;
+            break;
+        }
+    }
+    CHECK(entry != nullptr);
+    if (entry != nullptr) {
+        CHECK(entry->wasVisible == TRUE);
+        CHECK(entry->placement.showCmd != SW_SHOWMINIMIZED);
+        CHECK(entry->placement.showCmd != SW_MINIMIZE);
+    }
+
+    // Let the async minimize land, then restore and confirm it is on screen.
+    PumpUntil([window] { return IsIconic(window); }, 2000);
+    CHECK(orchestrator.RestoreAll());
+    PumpUntil([window] { return !IsIconic(window); }, 2000);
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window));
+
+    DestroyWindow(window);
+    DeleteFileW(kStaleState.c_str());
+}
+
 }  // namespace
 
 int wmain() {
@@ -1824,6 +1969,8 @@ int wmain() {
     TestRestoreNeverLeavesWindowMinimized();
     TestHideMinimizesRatherThanHides();
     TestRestoreKeepsUserMinimizedWindow();
+    TestRestoreNeverMinimizesVisibleWindow();
+    TestHideRefreshesStaleMinimizedSnapshot();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,
