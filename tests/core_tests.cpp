@@ -1978,6 +1978,79 @@ void TestRestoreHiddenWindowIgnoresInvisiblePlacement() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// A VISIBLE showCmd must never keep WPF_RESTORETOMAXIMIZED.
+//
+// Office reports WPF_RESTORETOMAXIMIZED on the transient minimized placement
+// it emits while rebuilding its frame. Normalising that showCmd to
+// SW_SHOWMAXIMIZED but leaving the flag produced a self-contradictory
+// placement ("visible" + "restore to maximized") that SetWindowPlacement --
+// and Office -- resolved down the MINIMIZE path, re-creating the desynced
+// WS_MINIMIZE|WS_MAXIMIZE sliver at (-32000,-32000). That is why a maximized
+// Excel window failed to come back while a normal one restored fine.
+// ---------------------------------------------------------------------------
+
+void TestPlacementFlagsSanitized() {
+    std::printf("-- placement flags: a visible showCmd drops WPF_RESTORETOMAXIMIZED\n");
+    using hideutil::core::SanitizePlacementFlags;
+
+    WINDOWPLACEMENT maximized{};
+    maximized.length = sizeof(WINDOWPLACEMENT);
+    maximized.showCmd = SW_SHOWMAXIMIZED;
+    maximized.flags = WPF_RESTORETOMAXIMIZED;
+    SanitizePlacementFlags(maximized);
+    CHECK((maximized.flags & WPF_RESTORETOMAXIMIZED) == 0);
+
+    WINDOWPLACEMENT normal{};
+    normal.length = sizeof(WINDOWPLACEMENT);
+    normal.showCmd = SW_SHOWNORMAL;
+    normal.flags = WPF_RESTORETOMAXIMIZED;
+    SanitizePlacementFlags(normal);
+    CHECK((normal.flags & WPF_RESTORETOMAXIMIZED) == 0);
+
+    // A genuinely minimized placement keeps the flag: it is the signal that the
+    // window should return to maximized when the user restores it.
+    WINDOWPLACEMENT minimized{};
+    minimized.length = sizeof(WINDOWPLACEMENT);
+    minimized.showCmd = SW_SHOWMINIMIZED;
+    minimized.flags = WPF_RESTORETOMAXIMIZED;
+    SanitizePlacementFlags(minimized);
+    CHECK((minimized.flags & WPF_RESTORETOMAXIMIZED) != 0);
+}
+
+void TestRestoreMaximizedWindowWithTransientFlag() {
+    std::printf("-- restore: maximized round trip with an Office-style transient flag\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestMaxFlag", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_MAXIMIZE);
+    PumpUntil([window] { return IsZoomed(window); }, 2000);
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
+    // Simulate Office's transient minimized placement, normalised to a visible
+    // showCmd but still carrying WPF_RESTORETOMAXIMIZED (the v1.1.6 field bug).
+    snapshot.placement.showCmd = SW_SHOWMAXIMIZED;
+    snapshot.placement.flags |= WPF_RESTORETOMAXIMIZED;
+    snapshot.placement.ptMinPosition.x = -32000;
+    snapshot.placement.ptMinPosition.y = -32000;
+    snapshot.prevStyle |= WS_MAXIMIZE;
+
+    CHECK(hider.ApplyHide(snapshot) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return IsIconic(window); }, 2000);
+    CHECK(IsIconic(window));
+
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return !IsIconic(window); }, 2000);
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window));
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -2026,6 +2099,8 @@ int wmain() {
     TestRestoreNeverMinimizesVisibleWindow();
     TestHideRefreshesStaleMinimizedSnapshot();
     TestRestoreHiddenWindowIgnoresInvisiblePlacement();
+    TestPlacementFlagsSanitized();
+    TestRestoreMaximizedWindowWithTransientFlag();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

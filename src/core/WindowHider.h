@@ -43,6 +43,21 @@ enum class WindowOpResult {
 // Pure function so it can be unit-tested without real windows.
 UINT ResolveRestoreShowCmd(UINT showCmd, BOOL wasVisible, LONG_PTR prevStyle);
 
+// Clear placement flags that contradict the showCmd we are about to apply.
+//
+// WPF_RESTORETOMAXIMIZED means "currently minimized; the next restore goes to
+// maximized". Office (Excel) reports it on the transient minimized placement
+// it emits while rebuilding its frame -- and the capture-time normalisation
+// above converts that showCmd to a VISIBLE one (SW_SHOWMAXIMIZED). If the flag
+// is left in place the placement becomes self-contradictory (visible showCmd +
+// "restore to maximized"), and SetWindowPlacement -- and Office itself --
+// resolve it down the MINIMIZE path, recreating the desynced
+// WS_MINIMIZE|WS_MAXIMIZE window parked at (-32000,-32000). That is why a
+// maximized Office window failed to come back while a normal one was fine.
+//
+// Pure function so it can be unit-tested without real windows.
+void SanitizePlacementFlags(WINDOWPLACEMENT& placement);
+
 class WindowHider {
 public:
     WindowHider();

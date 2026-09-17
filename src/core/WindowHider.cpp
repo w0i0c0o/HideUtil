@@ -77,6 +77,16 @@ UINT ResolveRestoreShowCmd(UINT showCmd, BOOL wasVisible, LONG_PTR prevStyle) {
     return ((prevStyle & WS_MAXIMIZE) != 0) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
 }
 
+void SanitizePlacementFlags(WINDOWPLACEMENT& placement) {
+    // WPF_RESTORETOMAXIMIZED only makes sense while the showCmd is minimized.
+    // With a visible showCmd it makes SetWindowPlacement (and Office) take the
+    // minimize path and re-create the WS_MINIMIZE|WS_MAXIMIZE double-bit
+    // window parked at (-32000,-32000).
+    if (placement.showCmd != SW_SHOWMINIMIZED) {
+        placement.flags &= ~static_cast<UINT>(WPF_RESTORETOMAXIMIZED);
+    }
+}
+
 WindowSnapshot WindowHider::SnapshotWindow(HWND hwnd) const {
     WindowSnapshot snapshot;
     snapshot.hwnd = hwnd;
@@ -90,6 +100,9 @@ WindowSnapshot WindowHider::SnapshotWindow(HWND hwnd) const {
     // transient minimized placement (see ResolveRestoreShowCmd).
     snapshot.placement.showCmd = ResolveRestoreShowCmd(
         snapshot.placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
+    // The normalisation above may have turned a transient minimized showCmd
+    // into a visible one; the matching flag must not survive that change.
+    SanitizePlacementFlags(snapshot.placement);
     snapshot.wasForeground = (GetForegroundWindow() == hwnd) ? TRUE : FALSE;
     snapshot.taskbarTabRemoved = FALSE;
     snapshot.altTabSuppressed = FALSE;
@@ -226,6 +239,9 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
             ((styleBeforeRestore & WS_MAXIMIZE) != 0);
         placement.showCmd = restoreMaximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
     }
+    // A legacy persisted snapshot (written before this sanitation existed) can
+    // still carry WPF_RESTORETOMAXIMIZED alongside a visible showCmd.
+    SanitizePlacementFlags(placement);
 
     // Undo the minimization ApplyHide applied, BEFORE the geometry is pinned
     // down. Going through SW_RESTORE (instead of letting SetWindowPlacement do
