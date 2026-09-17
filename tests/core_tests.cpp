@@ -2117,6 +2117,59 @@ void TestTransitionSuppressionFailSoft() {
     DestroyWindow(window);
 }
 
+// ---------------------------------------------------------------------------
+// A default (bringToFront=false) restore must not steal the keyboard focus --
+// that takeover is what produced the "the hidden window briefly occupies the
+// screen, then drops back" flash. The activating path is reserved for
+// bringToFront=true.
+//
+// Foreground ownership is conditional in a test session (the shell may refuse
+// SetForegroundWindow), so the strict assertion only runs when we had it.
+// ---------------------------------------------------------------------------
+
+void TestRestoreWithoutActivationKeepsForeground() {
+    std::printf("-- restore: default path does not steal the foreground\n");
+
+    HWND userWindow = CreateProbeWindow(L"HideUtilTestUserWnd", WS_OVERLAPPEDWINDOW, nullptr);
+    HWND target = CreateProbeWindow(L"HideUtilTestNoActivate", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(userWindow != nullptr);
+    CHECK(target != nullptr);
+    if (userWindow == nullptr || target == nullptr) {
+        if (userWindow != nullptr) {
+            DestroyWindow(userWindow);
+        }
+        if (target != nullptr) {
+            DestroyWindow(target);
+        }
+        return;
+    }
+    ShowWindow(userWindow, SW_SHOW);
+    ShowWindow(target, SW_SHOW);
+    SetForegroundWindow(userWindow);
+    PumpUntil([] { return false; }, 100);
+    const bool userWasForeground = (GetForegroundWindow() == userWindow);
+
+    hideutil::core::WindowHider hider;
+    hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(target);
+    CHECK(snapshot.wasVisible == TRUE);
+    CHECK(hider.ApplyHide(snapshot) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([target] { return IsIconic(target); }, 2000);
+    CHECK(IsIconic(target));
+
+    CHECK(hider.RestoreWindow(snapshot, /*bringToFront=*/false) ==
+          hideutil::core::WindowOpResult::Ok);
+    PumpUntil([target] { return !IsIconic(target); }, 2000);
+    CHECK(!IsIconic(target));
+    CHECK(IsWindowVisible(target));
+    if (userWasForeground) {
+        // The user's window stayed in front: the restore did not take over.
+        CHECK(GetForegroundWindow() == userWindow);
+    }
+
+    DestroyWindow(target);
+    DestroyWindow(userWindow);
+}
+
 }  // namespace
 
 int wmain() {
@@ -2169,6 +2222,7 @@ int wmain() {
     TestRestoreMaximizedWindowWithTransientFlag();
     TestRestoreKeepsMaximizedState();
     TestTransitionSuppressionFailSoft();
+    TestRestoreWithoutActivationKeepsForeground();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

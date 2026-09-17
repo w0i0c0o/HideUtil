@@ -269,31 +269,58 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     // still carry WPF_RESTORETOMAXIMIZED alongside a visible showCmd.
     SanitizePlacementFlags(placement);
 
-    // Undo the minimization ApplyHide applied, BEFORE the geometry is pinned
-    // down. Going through SW_RESTORE (instead of letting SetWindowPlacement do
-    // everything) matters: it is the normal "put the window back" path, so the
-    // application gets its WM_SHOWWINDOW / WM_SIZE sequence and rebuilds any
-    // UI it parked while hidden -- Office in particular restores its ribbon
-    // and status bar docks this way.
-    if (snapshot.wasVisible && iconicBeforeStyleRestore) {
-        ShowWindow(snapshot.hwnd, SW_RESTORE);
-    }
-
     if (snapshot.wasVisible) {
-        SetWindowPlacement(snapshot.hwnd, &placement);
-        if (IsIconic(snapshot.hwnd)) {
-            // Belt and braces: a hidden target must never be left minimized.
-            // SW_RESTORE is the only call that clears WS_MINIMIZE and puts the
-            // window back at its real geometry -- SW_SHOW would leave it parked
-            // off-screen (the "restored window vanished" failure).
-            ShowWindow(snapshot.hwnd, SW_RESTORE);
-        }
-        // SetWindowPlacement(SW_SHOWMAXIMIZED) is not honoured reliably for
-        // Office: the window comes back as a normal (restored) window parked
-        // at rcNormalPosition, losing the maximized state it had before being
-        // hidden. Re-assert the maximized state explicitly.
-        if (placement.showCmd == SW_SHOWMAXIMIZED && !IsZoomed(snapshot.hwnd)) {
-            ShowWindow(snapshot.hwnd, SW_MAXIMIZE);
+        if (bringToFront) {
+            // Activating restore: the caller explicitly wants the window to
+            // take the foreground, so use the normal "put it back" path --
+            // SW_RESTORE hands the app its WM_SHOWWINDOW / WM_SIZE sequence and
+            // lets Office rebuild the UI it parked while hidden.
+            if (iconicBeforeStyleRestore) {
+                ShowWindow(snapshot.hwnd, SW_RESTORE);
+            }
+            SetWindowPlacement(snapshot.hwnd, &placement);
+            if (IsIconic(snapshot.hwnd)) {
+                // Belt and braces: a hidden target must never be left minimized.
+                ShowWindow(snapshot.hwnd, SW_RESTORE);
+            }
+            // SetWindowPlacement(SW_SHOWMAXIMIZED) is not honoured reliably for
+            // Office: the window comes back as a normal (restored) window parked
+            // at rcNormalPosition, losing the maximized state it had before
+            // being hidden. Re-assert the maximized state explicitly.
+            if (placement.showCmd == SW_SHOWMAXIMIZED && !IsZoomed(snapshot.hwnd)) {
+                ShowWindow(snapshot.hwnd, SW_MAXIMIZE);
+            }
+        } else {
+            // Non-activating restore (the default): the user's current window
+            // keeps the keyboard focus, so no visible takeover happens.
+            //
+            // Primitive choice is measurement-driven (the "DIAG" experiment in
+            // tests/core_tests.cpp): ShowWindow(SW_SHOWNOACTIVATE) and
+            // SetWindowPos(SWP_SHOWWINDOW) do NOT leave the iconic state, and
+            // ShowWindow(SW_MAXIMIZE) on a minimized window does not either --
+            // only SetWindowPlacement with the no-activate showCmd restores the
+            // window to its captured geometry WITHOUT taking the foreground
+            // (SetWindowPlacement activates only for the activating showCmds;
+            // SW_RESTORE / SW_SHOWMAXIMIZED would).
+            WINDOWPLACEMENT noActivate = placement;
+            noActivate.length = sizeof(WINDOWPLACEMENT);
+            noActivate.showCmd = SW_SHOWNOACTIVATE;
+            SetWindowPlacement(snapshot.hwnd, &noActivate);
+            if (placement.showCmd == SW_SHOWMAXIMIZED && !IsZoomed(snapshot.hwnd)) {
+                // WS_MAXIMIZE can only be set through a ShowWindow command, and
+                // SW_SHOWMAXIMIZED is documented as activating -- so this last
+                // step may still take the foreground. It runs with the geometry
+                // already correct, and RestoreAll's z-order hand-back returns
+                // the foreground to the user's window either way.
+                ShowWindow(snapshot.hwnd, SW_MAXIMIZE);
+            }
+            if (IsIconic(snapshot.hwnd)) {
+                // The no-activate placement did not leave the minimized state:
+                // correctness first -- fall back to the activating restore
+                // rather than stranding the window minimized.
+                ShowWindow(snapshot.hwnd, SW_RESTORE);
+                SetWindowPlacement(snapshot.hwnd, &placement);
+            }
         }
     } else {
         // Originally-hidden window: it must simply stay hidden. Its captured
