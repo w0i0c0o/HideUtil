@@ -442,6 +442,19 @@ bool HideOrchestrator::RestoreAll() {
         // Ok -> restored. InvalidWindow -> destroyed, can never come back.
     }
 
+    // Final safety sweep: a target that was visible when we hid it must NEVER
+    // be left minimized. This is an independent second pass on purpose -- no
+    // single placement / style / permission quirk inside RestoreWindow may
+    // strand a window as a "visible but minimized" fragment (repeated P0 in
+    // the field: the window had a taskbar button and an Alt+Tab thumbnail,
+    // but clicking it did nothing).
+    for (const WindowSnapshot& window : restorable) {
+        if (window.wasVisible && window.hwnd != nullptr && IsWindow(window.hwnd) &&
+            IsIconic(window.hwnd)) {
+            ShowWindow(window.hwnd, SW_RESTORE);
+        }
+    }
+
     // Give the foreground back to the user when they did not ask for
     // bringToFront. SetWindowPlacement (WindowHider::RestoreWindow) has no
     // "no-activate" option -- unlike SetWindowPos(SWP_NOACTIVATE) or

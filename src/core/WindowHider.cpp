@@ -237,23 +237,28 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
         ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
 
-    SetWindowPlacement(snapshot.hwnd, &placement);
-
-    if (!snapshot.wasVisible) {
-        // Originally-hidden window: keep it hidden. The async hide is fine
-        // here (the user does not see a transition).
+    if (snapshot.wasVisible) {
+        SetWindowPlacement(snapshot.hwnd, &placement);
+        if (IsIconic(snapshot.hwnd)) {
+            // Belt and braces: a hidden target must never be left minimized.
+            // SW_RESTORE is the only call that clears WS_MINIMIZE and puts the
+            // window back at its real geometry -- SW_SHOW would leave it parked
+            // off-screen (the "restored window vanished" failure).
+            ShowWindow(snapshot.hwnd, SW_RESTORE);
+        }
+    } else {
+        // Originally-hidden window: it must simply stay hidden. Its captured
+        // placement is deliberately NOT applied -- a minimized/hidden showCmd
+        // here is exactly what produced the desynced WS_MINIMIZE|WS_MAXIMIZE
+        // "visible but minimized" window (visible, yet unclickable and
+        // unrecoverable). The geometry of a never-shown window does not
+        // matter, and re-showing it would tear down Office command bars.
         ShowWindowAsync(snapshot.hwnd, SW_HIDE);
-    } else if (IsIconic(snapshot.hwnd)) {
-        // Belt and braces: a hidden target must never be left minimized.
-        // SW_RESTORE is the only call that clears WS_MINIMIZE and puts the
-        // window back at its real geometry -- SW_SHOW would leave it parked
-        // off-screen (the "restored window vanished" failure).
-        ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
-    // For the wasVisible==true path we deliberately do NOT issue
-    // ShowWindow(SW_SHOW/SW_RESTORE): SetWindowPlacement above has already
-    // applied the correct showCmd, and re-issuing a generic "show" would
-    // clobber the carefully-restored geometry.
+    // For the wasVisible==true path we deliberately do NOT issue a generic
+    // ShowWindow(SW_SHOW): SetWindowPlacement above has already applied the
+    // correct showCmd, and re-issuing a generic "show" would clobber the
+    // carefully-restored geometry.
 
     // Force DWM to recomposite the recovered area. Without this, the
     // window can stay visually black / blank until the user wiggles

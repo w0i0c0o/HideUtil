@@ -1929,6 +1929,55 @@ void TestHideRefreshesStaleMinimizedSnapshot() {
     DeleteFileW(kStaleState.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// An originally-hidden window must stay hidden: its captured placement must
+// NOT be re-applied. Applying a minimized/hidden placement is what produced
+// the "visible yet minimized" stranded window (MIN|MAX double bit at
+// (-32000,-32000)) that the user could neither click nor restore.
+// ---------------------------------------------------------------------------
+
+void TestRestoreHiddenWindowIgnoresInvisiblePlacement() {
+    std::printf("-- restore: hidden window stays hidden, placement not re-applied\n");
+
+    HWND window = CreateProbeWindow(L"HideUtilTestHidden", WS_OVERLAPPEDWINDOW, nullptr);
+    CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    ShowWindow(window, SW_SHOW);
+    PumpUntil([] { return false; }, 50);
+    ShowWindow(window, SW_HIDE);
+    PumpUntil([window] { return !IsWindowVisible(window); }, 2000);
+
+    hideutil::core::WindowSnapshot snapshot;
+    snapshot.hwnd = window;
+    GetWindowThreadProcessId(window, &snapshot.pid);
+    snapshot.wasVisible = FALSE;
+    snapshot.prevStyle = (GetWindowLongPtrW(window, GWL_STYLE) | WS_MINIMIZE) &
+                         ~static_cast<LONG_PTR>(WS_MAXIMIZE);
+    snapshot.prevExStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    snapshot.placement.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(window, &snapshot.placement);
+    snapshot.placement.showCmd = SW_SHOWMINIMIZED;
+    snapshot.placement.flags = WPF_RESTORETOMAXIMIZED;
+    snapshot.placement.ptMinPosition.x = -32000;
+    snapshot.placement.ptMinPosition.y = -32000;
+
+    hideutil::core::WindowHider hider;
+    CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
+    PumpUntil([window] { return false; }, 100);
+
+    // Still hidden...
+    CHECK(!IsWindowVisible(window));
+    // ...and the bogus placement was NOT applied: pre-fix the window was moved
+    // to ptMinPosition (-32000,-32000) and briefly shown.
+    RECT after{};
+    GetWindowRect(window, &after);
+    CHECK(after.left > -30000);
+
+    DestroyWindow(window);
+}
+
 }  // namespace
 
 int wmain() {
@@ -1976,6 +2025,7 @@ int wmain() {
     TestRestoreBringsBackMinimizedWindow();
     TestRestoreNeverMinimizesVisibleWindow();
     TestHideRefreshesStaleMinimizedSnapshot();
+    TestRestoreHiddenWindowIgnoresInvisiblePlacement();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

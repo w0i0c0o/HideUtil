@@ -22,6 +22,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -257,6 +258,29 @@ bool WinTreePidMatches(const WinTreeContext& ctx, DWORD pid) {
     return false;
 }
 
+// Optional per-window annotation taken from the persisted snapshot
+// (state.json), so `--wintree` also shows exactly what HideUtil recorded for
+// each window. This is the decisive evidence when a hide/restore anomaly has
+// to be diagnosed from a single dump.
+std::map<HWND, std::wstring> g_snapshotAnnotation;
+
+void LoadSnapshotAnnotations() {
+    g_snapshotAnnotation.clear();
+    StateStore store;
+    if (!store.RestoreFromFile(StateStore::DefaultStatePath())) {
+        return;
+    }
+    for (const hideutil::core::WindowSnapshot& window : store.Snapshot().windows) {
+        wchar_t text[192] = {};
+        swprintf_s(text, L"  snap[wasVisible=%d showCmd=%u flags=0x%04X prevStyle=0x%08X]",
+                   window.wasVisible ? 1 : 0,
+                   static_cast<unsigned>(window.placement.showCmd),
+                   static_cast<unsigned>(window.placement.flags),
+                   static_cast<unsigned>(window.prevStyle));
+        g_snapshotAnnotation[window.hwnd] = text;
+    }
+}
+
 void DumpWindowNode(HWND hwnd, int depth) {
     wchar_t className[256] = {};
     GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
@@ -282,6 +306,10 @@ void DumpWindowNode(HWND hwnd, int depth) {
                rehiddable ? 1 : 0, static_cast<unsigned>(style),
                static_cast<unsigned>(exStyle), rect.left, rect.top, rect.right, rect.bottom,
                rect.right - rect.left, rect.bottom - rect.top, className, title);
+    const auto annotation = g_snapshotAnnotation.find(hwnd);
+    if (annotation != g_snapshotAnnotation.end()) {
+        wcscat_s(line, annotation->second.c_str());
+    }
     OutLine(line);
 }
 
@@ -364,6 +392,7 @@ int CommandWinTree(const std::wstring& filter) {
         return 2;
     }
     OutLine(L"window tree for '" + filter + L"' (vis=IsWindowVisible, rehide=root of window tree)");
+    LoadSnapshotAnnotations();
     EnumWindows(WinTreeEnumProc, reinterpret_cast<LPARAM>(&ctx));
     if (ctx.dumped == 0) {
         OutLine(L"wintree: no window found for the matched pid(s)");
