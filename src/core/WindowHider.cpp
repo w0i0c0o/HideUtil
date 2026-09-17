@@ -109,9 +109,6 @@ WindowOpResult WindowHider::ApplyHide(const WindowSnapshot& snapshot) {
     if (snapshot.taskbarTabRemoved) {
         RemoveTaskbarTab(snapshot.hwnd);
     }
-    if (snapshot.altTabSuppressed) {
-        SetToolWindow(snapshot.hwnd, true);
-    }
     // Get the window off the screen by MINIMIZING it, not with SW_HIDE.
     //
     // SW_HIDE makes Office (Excel / Word) tear down its command-bar docks to
@@ -149,6 +146,17 @@ WindowOpResult WindowHider::ApplyHide(const WindowSnapshot& snapshot) {
             Sleep(25);
         }
     }
+    // Apply the Alt+Tab suppression only AFTER the window is off-screen.
+    // Setting WS_EX_TOOLWINDOW (with SWP_FRAMECHANGED) on a still-visible
+    // Office window makes Office rebuild its entire main frame -- fresh
+    // HWNDs, born minimized -- which then has to be chased and restored.
+    // Field window-tree captures make this concrete: with the suppression
+    // off the XLMAIN handles stayed stable across hide/restore; with it on
+    // they were recreated. Doing the style change once the window is
+    // minimized avoids that churn.
+    if (snapshot.altTabSuppressed) {
+        SetToolWindow(snapshot.hwnd, true);
+    }
     return WindowOpResult::Ok;
 }
 
@@ -185,23 +193,39 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
         AddTaskbarTab(snapshot.hwnd);
     }
 
-    // Was the window ALREADY minimized by the user before we hid it? That
-    // state lives in the snapshot (ResolveRestoreShowCmd preserves it) and
-    // must be left alone below.
+    // A window we hid must come back VISIBLE -- never minimized.
     //
-    // Stale-entry self-heal: the entry claims the window was minimized when
-    // hidden, but the window is on screen RIGHT NOW (not iconic). Such an
-    // entry predates a cycle in which the user recovered the window
-    // themselves (or an async SW_MINIMIZE raced a fast toggle and stranded
-    // the window). Forcing SW_SHOWMINIMIZED back would minimize a window
-    // the user can currently see -- restore must NEVER make a visible
-    // window invisible.
-    const bool claimsMinimized = (snapshot.placement.showCmd == SW_SHOWMINIMIZED) ||
-                                 (snapshot.placement.showCmd == SW_MINIMIZE) ||
-                                 (snapshot.placement.showCmd == SW_FORCEMINIMIZE);
-    const bool staleMinimizedEntry = claimsMinimized && !iconicBeforeStyleRestore;
-    const bool userHadMinimized =
-        (snapshot.placement.showCmd == SW_SHOWMINIMIZED) && !staleMinimizedEntry;
+    // Earlier revisions tried to preserve a "the user had minimized it"
+    // state, but that state is indistinguishable from our own leaked
+    // minimize: ApplyHide minimizes, and Office can rebuild its whole frame
+    // (fresh HWNDs) while minimized, so the rebuilt frame is captured
+    // minimized by the watchdog and then "preserved" on restore -- stranding
+    // the target as a tiny fragment at the bottom of the screen with no
+    // taskbar button. Two P0 field failures came from that policy, so it is
+    // retired: any minimized/hidden showCmd on a window that was visible at
+    // hide time is converted to the visible state its captured style /
+    // placement flags describe.
+    const bool claimsInvisible =
+        (snapshot.placement.showCmd == SW_SHOWMINIMIZED) ||
+        (snapshot.placement.showCmd == SW_MINIMIZE) ||
+        (snapshot.placement.showCmd == SW_HIDE) ||
+        (snapshot.placement.showCmd == SW_FORCEMINIMIZE);
+
+    // SetWindowPlacement is the single source of truth for the recovered
+    // geometry and show state. Applying it once means the window appears at
+    // its real position and size, not at the default "centered default size"
+    // that a generic ShowWindow(SW_SHOW) would force on top of it.
+    WINDOWPLACEMENT placement = snapshot.placement;
+    placement.length = sizeof(WINDOWPLACEMENT);
+    placement.showCmd =
+        ResolveRestoreShowCmd(placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
+    if (snapshot.wasVisible && claimsInvisible) {
+        const bool restoreMaximized =
+            ((snapshot.prevStyle & WS_MAXIMIZE) != 0) ||
+            ((snapshot.placement.flags & WPF_RESTORETOMAXIMIZED) != 0) ||
+            ((styleBeforeRestore & WS_MAXIMIZE) != 0);
+        placement.showCmd = restoreMaximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+    }
 
     // Undo the minimization ApplyHide applied, BEFORE the geometry is pinned
     // down. Going through SW_RESTORE (instead of letting SetWindowPlacement do
@@ -209,56 +233,21 @@ WindowOpResult WindowHider::RestoreWindow(const WindowSnapshot& snapshot, bool b
     // application gets its WM_SHOWWINDOW / WM_SIZE sequence and rebuilds any
     // UI it parked while hidden -- Office in particular restores its ribbon
     // and status bar docks this way.
-    if (snapshot.wasVisible && !userHadMinimized && IsIconic(snapshot.hwnd)) {
+    if (snapshot.wasVisible && iconicBeforeStyleRestore) {
         ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
 
-    // SetWindowPlacement is the single source of truth for the recovered
-    // geometry and show state. Its showCmd is the exact original state
-    // captured at hide time (SW_SHOWNORMAL / SW_SHOWMAXIMIZED /
-    // SW_SHOWMINIMIZED / SW_HIDE). Applying it once here means the window
-    // appears at its real position and size, not at the default "centered
-    // default size" that any subsequent ShowWindow(SW_SHOW/SW_RESTORE)
-    // would otherwise force on top of it.
-    WINDOWPLACEMENT placement = snapshot.placement;
-    placement.length = sizeof(WINDOWPLACEMENT);
-    if (staleMinimizedEntry) {
-        // Bypass ResolveRestoreShowCmd: its genuinelyMinimized test trusts
-        // prevStyle, which for a stale entry still carries WS_MINIMIZE and
-        // would keep returning SW_SHOWMINIMIZED. Resolve against the
-        // window's CURRENT style instead (captured before our own style
-        // write above).
-        placement.showCmd =
-            (styleBeforeRestore & WS_MAXIMIZE) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
-    } else {
-        // Defensive second pass: a snapshot written by an older build (or by
-        // a hide that raced with the app's frame rebuild) can still carry a
-        // bogus SW_SHOWMINIMIZED. Never let it minimize a window that was
-        // visible.
-        placement.showCmd =
-            ResolveRestoreShowCmd(placement.showCmd, snapshot.wasVisible, snapshot.prevStyle);
-    }
-    // A window that is ALREADY in its snapshotted minimized state must not
-    // get the placement re-applied: SetWindowPlacement(SW_SHOWMINIMIZED +
-    // WPF_RESTORETOMAXIMIZED) on top of the restored prevStyle produces the
-    // desynced WS_MINIMIZE|WS_MAXIMIZE double-bit state observed in the
-    // field ("restored window vanished" at (-32000,-32000)).
-    const bool alreadyInSnapshottedState = userHadMinimized && iconicBeforeStyleRestore;
-    if (!alreadyInSnapshottedState) {
-        SetWindowPlacement(snapshot.hwnd, &placement);
-    }
+    SetWindowPlacement(snapshot.hwnd, &placement);
 
     if (!snapshot.wasVisible) {
         // Originally-hidden window: keep it hidden. The async hide is fine
         // here (the user does not see a transition).
         ShowWindowAsync(snapshot.hwnd, SW_HIDE);
-    } else if (IsIconic(snapshot.hwnd) && !userHadMinimized) {
-        // Belt and braces. If the window ended up minimized anyway (a placement
-        // whose rcNormalPosition/ptMinPosition disagrees with its showCmd, or
-        // an app that minimized itself while hidden), SW_RESTORE is the only
-        // call that clears WS_MINIMIZE and puts it back at its real geometry --
-        // SW_SHOW would leave the window minimized and off-screen.
-        // A window the user had minimized themselves stays minimized.
+    } else if (IsIconic(snapshot.hwnd)) {
+        // Belt and braces: a hidden target must never be left minimized.
+        // SW_RESTORE is the only call that clears WS_MINIMIZE and puts the
+        // window back at its real geometry -- SW_SHOW would leave it parked
+        // off-screen (the "restored window vanished" failure).
         ShowWindow(snapshot.hwnd, SW_RESTORE);
     }
     // For the wasVisible==true path we deliberately do NOT issue

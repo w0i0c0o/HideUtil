@@ -1754,27 +1754,32 @@ void TestHideMinimizesRatherThanHides() {
     DestroyWindow(window);
 }
 
-void TestRestoreKeepsUserMinimizedWindow() {
-    std::printf("-- restore: a window the user minimized stays minimized\n");
+void TestRestoreBringsBackMinimizedWindow() {
+    std::printf("-- restore: a window that was minimized still comes back visible\n");
 
     HWND window = CreateProbeWindow(L"HideUtilTestUserMin", WS_OVERLAPPEDWINDOW, nullptr);
     CHECK(window != nullptr);
     if (window == nullptr) {
         return;
     }
-    // Snapshot it while the USER has it minimized.
+    // Snapshot it while it is minimized (the ambiguous state that used to be
+    // "preserved" on restore).
     ShowWindow(window, SW_SHOWMINIMIZED);
     PumpUntil([] { return false; }, 50);
 
     hideutil::core::WindowHider hider;
     hideutil::core::WindowSnapshot snapshot = hider.SnapshotWindow(window);
-    // A user-minimized window is still "visible" in the Win32 sense.
+    // A minimized window is still "visible" in the Win32 sense.
     CHECK(snapshot.wasVisible == TRUE);
     CHECK(snapshot.placement.showCmd == SW_SHOWMINIMIZED);
 
-    // Restoring must NOT pop it open -- that would fight the user.
+    // Restore must return it to a usable, ON-SCREEN state -- never strand it
+    // minimized (that policy caused repeated P0 field failures: a hidden
+    // target left as a tiny fragment at the bottom with no taskbar button).
     CHECK(hider.RestoreWindow(snapshot, false) == hideutil::core::WindowOpResult::Ok);
-    CHECK(IsIconic(window));
+    PumpUntil([window] { return !IsIconic(window); }, 2000);
+    CHECK(!IsIconic(window));
+    CHECK(IsWindowVisible(window));
 
     DestroyWindow(window);
 }
@@ -1968,7 +1973,7 @@ int wmain() {
     TestResolveRestoreShowCmd();
     TestRestoreNeverLeavesWindowMinimized();
     TestHideMinimizesRatherThanHides();
-    TestRestoreKeepsUserMinimizedWindow();
+    TestRestoreBringsBackMinimizedWindow();
     TestRestoreNeverMinimizesVisibleWindow();
     TestHideRefreshesStaleMinimizedSnapshot();
 
