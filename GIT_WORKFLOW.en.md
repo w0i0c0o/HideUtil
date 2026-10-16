@@ -55,6 +55,7 @@ git branch -d fix/xxx         # Delete the short-lived branch after merging
 
 - Only tag stable commits on `main`; never tag releases on feature branches.
 - If a remote is configured, the tag needs `git push origin vX.Y.Z`.
+- **Pushing a `vX.Y.Z` tag publishes automatically**: `.github/workflows/release.yml` builds `HideUtil.exe` on a GitHub runner, computes its SHA-256, and attaches that single asset to the release for the tag, with bilingual (English + Simplified Chinese) release notes generated on the fly. **Do not upload the exe by hand**, and never commit it to the repository (`.gitignore` excludes `*.exe`).
 
 ## 6. Commit Message Convention (Conventional Commits)
 
@@ -114,6 +115,9 @@ If any step returns non-zero, `pre-commit` does `exit 1` and the commit is rejec
 - For emergency commits, or when CI already runs the full regression, you can bypass it temporarily with `git commit --no-verify`; **`--no-verify` is forbidden in normal development**.
 - If a full rebuild on every commit feels too slow, copy `hooks/pre-commit` to `hooks/pre-push` (run only before pushing), or change step 1 to the incremental `cmake --build build`.
 
-### Remote CI (optional, once a remote is configured)
+### Remote CI (configured: GitHub Actions)
 
-This repository is currently local-only. `core.hooksPath` only covers this machine. If it is later pushed to GitHub or another remote, add `.github/workflows/ci.yml` to run the same "build + test" suite on a cloud runner so that PRs and pushes are gated too (note: the VS/MSVC version on cloud Windows runners may differ from the local 14.51, so the toolchain paths in `scripts/build.sh` must be kept in sync).
+- `.github/workflows/ci.yml` runs on `push` / `pull_request` to `main` and on manual `workflow_dispatch`. On `windows-latest` it builds all four targets with Ninja + MSVC and asserts that `HideUtil.exe` and friends exist.
+- **The gate is compile-only; it does not gate on the unit tests.** `hideutil_tests` drives real top-level windows, global hotkeys and process suspension, so its result depends on interactive desktop session state (whether the OS grants foreground changes the assertion count — see the 466/461 note in `overview.md`). It therefore runs with `continue-on-error` as an informational step and never blocks a merge.
+- The cloud runner's MSVC differs from the local one: **measured — cloud VS 2022 produces 678,400 bytes, local VS 2026 produces 677,888 bytes**. Both are valid builds; size and SHA-256 will not match, so never validate one against the other.
+- `core.hooksPath` only covers this machine. Remote CI is a second, independent gate; the two coexist and neither replaces the other.

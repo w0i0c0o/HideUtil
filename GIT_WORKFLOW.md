@@ -55,6 +55,8 @@ git branch -d fix/xxx         # 合并后删除短生命周期分支
 
 - 仅对 `main` 上的稳定提交打发布标签，不在特性分支打发布标签。
 - 若已配置远端，标签需 `git push origin vX.Y.Z`。
+- **推送 `vX.Y.Z` 标签即自动发布**：`.github/workflows/release.yml` 会在 GitHub Runner 上构建 `HideUtil.exe`、计算 SHA-256，并把这唯一一个附件挂到该标签的 Release 上，Release 说明为中英双语、自动生成。**不要手工上传 exe**，也不要把 exe 提交进仓库（`.gitignore` 已排除 `*.exe`）。
+- 打完标签后又补了 LICENSE / README 之类的纯文档提交时，先 `git diff --name-only <tag> HEAD` 确认只改了文档，是则 `git tag -f <tag> HEAD` 把标签移到最新提交 —— GitHub Release 的源码包按标签提交生成，不移动会让用户下到的源码包缺少 LICENSE。
 
 ## 6. 提交信息约定（Conventional Commits）
 
@@ -114,7 +116,10 @@ git config core.hooksPath hooks
 - 紧急提交、或 CI 环境已另跑完整回归时，可用 `git commit --no-verify` 临时绕过；**正常开发禁止 `--no-verify`**。
 - 若觉得每次提交都全量重建太慢，可将 `hooks/pre-commit` 复制为 `hooks/pre-push`（仅推送前跑），或把第 1 步改为增量 `cmake --build build`。
 
-### 远端 CI（可选，待配置远端后）
+### 远端 CI（已配置：GitHub Actions）
 
-本仓库当前为本地仓库。`core.hooksPath` 只覆盖本机。若之后挂到 GitHub 等远端，应另加 `.github/workflows/ci.yml` 在云端 runner 上跑同一套「构建 + 测试」，使 PR/推送也受门禁约束（注意：云端 Windows runner 的 VS/MSVC 版本可能与本机 14.51 不同，需同步 `scripts/build.sh` 中的工具链路径）。
+- `.github/workflows/ci.yml`：`push` / `pull_request` 到 `main` 以及手动 `workflow_dispatch` 时，在 `windows-latest` 上用 Ninja + MSVC 编译四个目标，并断言 `HideUtil.exe` 等产物存在。
+- **该门禁只做编译校验，不以单测结果为准**：`hideutil_tests` 驱动真实顶层窗口、全局热键与进程挂起，结果依赖交互式桌面会话状态（前台授权会影响断言条数，见 `overview.md` 的 466/461 说明），因此以 `continue-on-error` 信息性运行，永不阻塞合并。
+- 云端 Runner 的 MSVC 版本与本机不同：**实测云端 VS 2022 产物 678,400 字节，本机 VS 2026 产物 677,888 字节**，两者都是正常产物，字节数与 SHA-256 不必一致，不要用其中一个去校验另一个。
+- `core.hooksPath` 只覆盖本机，远端 CI 是第二道门禁，两者并存、互不可替代。
 
