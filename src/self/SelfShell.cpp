@@ -4,6 +4,8 @@
 #include "self/InstanceHandoff.h"
 #include "self/Logger.h"
 
+#include "i18n/Localizer.h"
+
 #include <commctrl.h>
 
 #include <cstdio>
@@ -58,6 +60,12 @@ int SelfShell::Run(HINSTANCE instance, bool showSettingsRequested, const std::ws
     const std::wstring configPath = core::AppRuleStore::DefaultConfigPath();
     ruleStore_.EnsureDefaultConfig(configPath);
     ruleStore_.Load(configPath);
+
+    // Resolve the UI language now that the config is available: "auto" follows
+    // the system UI language and an undeveloped language falls back to English.
+    // Before this point (the single-instance handoff further up) Localizer was
+    // already initialized with the system default from wWinMain.
+    i18n::Localizer::Initialize(ruleStore_.Config().language);
 
     // Persist the snapshot to the standard state file. Without this a crash (or
     // a forced kill) would leave the target windows hidden with no way back;
@@ -231,13 +239,11 @@ void SelfShell::QuitApplication() {
     const bool genuineLeftovers =
         status.hasSnapshot && (status.windowCount > 0 || status.audioCount > 0);
     if (hidThisSession_ && genuineLeftovers) {
-        wchar_t detail[320];
-        swprintf_s(detail,
-                   L"仍有 %zu 个窗口 / %zu 个音频会话未能恢复。\n\n"
-                   L"状态文件已保留：\n%%APPDATA%%\\HideUtil\\state.json\n\n"
-                   L"可再次运行 HideUtil.exe，或用 hideutil_cli.exe --restore 重试。",
-                   status.windowCount, status.audioCount);
-        MessageBoxW(settings_.Handle(), detail, L"退出 HideUtil", MB_OK | MB_ICONWARNING);
+        const std::wstring detail = i18n::Localizer::Format(
+            i18n::Localizer::Get("quit.warnBody"), std::to_wstring(status.windowCount),
+            std::to_wstring(status.audioCount));
+        MessageBoxW(settings_.Handle(), detail.c_str(),
+                    i18n::Localizer::Get("quit.warnTitle").c_str(), MB_OK | MB_ICONWARNING);
     } else if (!genuineLeftovers) {
         // Nothing is actually hidden any more (everything was restored, or the
         // leftover entries were inert). Remove the stale state file so it does

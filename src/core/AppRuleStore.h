@@ -63,5 +63,14 @@ AppConfig MakeDefaultConfig();
 JsonValue ConfigToJson(const AppConfig& config);
 bool JsonToConfig(const JsonValue& value, AppConfig& out, std::wstring& error);
 
+// Returns "rule-N" where N is the smallest positive integer not already
+// taken by an existing rule. Never returns a colliding id.
+std::wstring GenerateUniqueRuleId(const std::vector<AppRule>& rules);
+
+// In-place repair of duplicate ids loaded from an older or damaged config:
+// keeps the first occurrence of each id untouched and re-assigns later
+// duplicates. Idempotent -- running it twice must not change anything.
+void NormalizeDuplicateRuleIds(std::vector<AppRule>& rules);
+
 }  // namespace core
 }  // namespace hideutil

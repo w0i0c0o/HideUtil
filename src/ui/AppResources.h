@@ -7,3 +7,9 @@
 #pragma once
 
 #define IDI_APP_ICON 101
+
+// Embedded language documents (resources/lang/*.json), loaded by
+// i18n/Localizer as RCDATA. Declared here so the resource script and the C++
+// loader can never drift apart.
+#define IDR_LANG_EN_US 201
+#define IDR_LANG_ZH_CN 202

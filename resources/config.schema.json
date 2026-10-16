@@ -6,6 +6,7 @@
   "required": ["version"],
   "properties": {
     "version": { "type": "integer", "const": 1 },
+    "language": { "type": "string", "enum": ["auto", "en-US", "zh-CN"] },
     "hotkey": {
       "type": "object",
       "properties": {

@@ -2,6 +2,8 @@
 #include "self/InstanceHandoff.h"
 #include "self/SelfShell.h"
 
+#include "i18n/Localizer.h"
+
 #include <windows.h>
 
 #include <string>
@@ -10,6 +12,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
                     int /*nCmdShow*/) {
     using hideutil::self::LaunchExitCode;
     using hideutil::self::LaunchIntent;
+
+    // Resolve the UI language from the system UI language before anything can
+    // put a message on screen (the single-instance handoff below may do so).
+    // The configuration override ("auto" / "en-US" / "zh-CN") is applied later
+    // by SelfShell once config.json has been loaded; a language we have not
+    // developed falls back to English.
+    hideutil::i18n::Localizer::Initialize(hideutil::i18n::kLangAuto);
 
     const std::wstring commandLine =
         (pCmdLine != nullptr) ? std::wstring(pCmdLine) : std::wstring();

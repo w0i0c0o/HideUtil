@@ -37,6 +37,7 @@ add_library(hideutil_core STATIC
     src/core/JumpListCleaner.cpp
     src/ui/SettingsWindow.cpp
     src/ui/IconCache.cpp
+    src/i18n/Localizer.cpp
     src/self/HotkeyManager.cpp
     src/self/Logger.cpp
     src/self/SelfShell.cpp

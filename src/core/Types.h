@@ -141,6 +141,10 @@ struct AppConfig {
     // false so the user's current foreground work is not yanked away when
     // hidden windows come back.
     bool bringRestoredToFront = false;
+
+    // UI language: "auto" (follow the system UI language), "en-US" or "zh-CN".
+    // See i18n/Localizer. Defaults to "auto".
+    std::wstring language = L"auto";
 };
 
 // ---------------------------------------------------------------------------

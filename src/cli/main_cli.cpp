@@ -187,6 +187,9 @@ int CommandSettingsDump(AppRuleStore& store) {
         swprintf_s(line, L"version=%d rules=%zu", config.version, config.rules.size());
         OutLine(line);
     }
+    // Diagnostic output is deliberately hard-coded English: it must not shift
+    // with the UI language the user picked in config.language.
+    OutLine(L"language=" + config.language);
     OutLine(L"hotkey.hideToggle   = " + FormatHotkey(config.hotkey.hideToggle));
     OutLine(L"hotkey.openSettings = " + FormatHotkey(config.hotkey.openSettings));
     {

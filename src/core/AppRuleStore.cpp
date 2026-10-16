@@ -22,6 +22,22 @@ bool IEquals(const std::wstring& a, const std::wstring& b) {
     return true;
 }
 
+bool Contains(const std::vector<std::wstring>& ids, const std::wstring& id) {
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+
+// Smallest positive integer N such that "rule-N" is not in `taken`. With N
+// taken ids the answer is at most N + 1, so the bounded loop always hits.
+std::wstring FirstFreeRuleId(const std::vector<std::wstring>& taken) {
+    for (std::size_t n = 1; n <= taken.size() + 1; ++n) {
+        const std::wstring candidate = L"rule-" + std::to_wstring(n);
+        if (!Contains(taken, candidate)) {
+            return candidate;
+        }
+    }
+    return L"rule-" + std::to_wstring(taken.size() + 1);
+}
+
 std::wstring ReadOptionalString(const JsonValue* value) {
     if (!value || value->IsNull()) return std::wstring();
     return value->IsString() ? value->AsString() : std::wstring();
@@ -257,6 +273,7 @@ AppConfig MakeDefaultConfig() {
     config.runtime.startHidden = true;
     config.runtime.registerAutostart = false;
     config.runtime.pollIntervalMs = 1500;
+    config.language = L"auto";
     return config;
 }
 
@@ -264,6 +281,7 @@ JsonValue ConfigToJson(const AppConfig& config) {
     JsonValue root = JsonValue::MakeObject();
     root.Set(L"$schema", JsonValue::MakeString(L"https://example.com/hideutil/config.schema.json"));
     root.Set(L"version", JsonValue::MakeNumber(config.version));
+    root.Set(L"language", JsonValue::MakeString(config.language));
 
     JsonValue hotkey = JsonValue::MakeObject();
     hotkey.Set(L"hideToggle", HotkeySpecToJson(config.hotkey.hideToggle));
@@ -304,6 +322,11 @@ bool JsonToConfig(const JsonValue& value, AppConfig& out, std::wstring& error) {
             config.version = static_cast<int>(version->AsInt());
         }
     }
+    if (const JsonValue* language = value.Find(L"language")) {
+        if (language->IsString() && !language->AsString().empty()) {
+            config.language = language->AsString();
+        }
+    }
     if (const JsonValue* hotkey = value.Find(L"hotkey")) {
         if (const JsonValue* hideToggle = hotkey->Find(L"hideToggle")) {
             config.hotkey.hideToggle = ParseHotkeySpec(hideToggle);
@@ -336,8 +359,51 @@ bool JsonToConfig(const JsonValue& value, AppConfig& out, std::wstring& error) {
             }
         }
     }
+    // Self-heal: configs written by older builds can contain duplicate rule
+    // ids, because OnAddRule() used to derive the id from rules_.size() + 1,
+    // which rewinds after a rule is deleted. Repairing here (and letting the
+    // next Save() persist the fixed ids) is the most reliable fix: rule.id is
+    // only consumed as the display-name fallback in
+    // SettingsWindow::RefreshRules and is referenced by neither state.json nor
+    // any other module, so renaming an id has no side effects.
+    NormalizeDuplicateRuleIds(config.rules);
     out = config;
     return true;
+}
+
+std::wstring GenerateUniqueRuleId(const std::vector<AppRule>& rules) {
+    std::vector<std::wstring> taken;
+    taken.reserve(rules.size());
+    for (const AppRule& rule : rules) {
+        taken.push_back(rule.id);
+    }
+    return FirstFreeRuleId(taken);
+}
+
+void NormalizeDuplicateRuleIds(std::vector<AppRule>& rules) {
+    // Every id in the list is marked taken up front, so a freshly minted id can
+    // neither collide with an already accepted one nor with a rule we have not
+    // visited yet -- that keeps the first occurrence of each original id
+    // untouched. The pass leaves all ids distinct, so a second pass accepts
+    // everything as-is and changes nothing (idempotent).
+    std::vector<std::wstring> taken;
+    taken.reserve(rules.size());
+    for (const AppRule& rule : rules) {
+        taken.push_back(rule.id);
+    }
+
+    std::vector<std::wstring> seen;
+    seen.reserve(rules.size());
+    for (AppRule& rule : rules) {
+        if (!Contains(seen, rule.id)) {
+            seen.push_back(rule.id);
+            continue;
+        }
+        const std::wstring fresh = FirstFreeRuleId(taken);
+        rule.id = fresh;
+        seen.push_back(fresh);
+        taken.push_back(fresh);
+    }
 }
 
 }  // namespace core

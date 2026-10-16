@@ -4,6 +4,8 @@
 #include "self/Logger.h"
 #include "self/SelfShell.h"
 
+#include "i18n/Localizer.h"
+
 #include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -14,6 +16,8 @@ namespace hideutil {
 namespace self {
 
 namespace {
+
+using L10n = hideutil::i18n::Localizer;
 
 // Auto-reset: one wake, one acknowledgement.
 const wchar_t* kAckEventName = L"Local\\HideUtil_WakeAck_Event";
@@ -365,18 +369,15 @@ bool TerminateInstanceByPid(DWORD pid, const std::wstring& expectedImagePath) {
 }
 
 std::wstring BuildUnresponsivePrompt(const std::wstring& runningPath) {
-    std::wstring message =
-        L"HideUtil 已在运行，但似乎没有响应。\n\n是否结束该实例并重新启动？";
+    std::wstring message = L10n::Get("instance.unresponsive");
     if (!runningPath.empty()) {
-        message += L"\n\n运行中的实例路径：\n" + runningPath;
+        message += L"\n\n" + L10n::Get("instance.unresponsivePath") + L"\n" + runningPath;
     }
     return message;
 }
 
 std::wstring BuildRejectedSwitchMessage(const std::wstring& switchName) {
-    std::wstring message = L"HideUtil 不支持该命令行参数：";
-    message += switchName;
-    message += L"\n\n需要执行隐藏/恢复/查询等操作，请使用命令行工具：";
+    std::wstring message = L10n::Format(L10n::Get("instance.rejectedSwitch"), switchName);
     message += L"\n    hideutil_cli.exe";
     return message;
 }

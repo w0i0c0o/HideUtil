@@ -9,8 +9,9 @@
 一个 Windows 用户态桌面工具：全局热键一键隐藏/恢复指定应用的全部显示痕迹（窗口、任务栏按钮、Alt+Tab 条目、音频），支持多应用配置化管理，并提供**可修改全局快捷键的原生设置界面**。**全程零驱动、零内核 hook。**
 
 - **构建状态**：零错误、零警告，产出 4 个可执行目标
-- **测试状态**：单元测试 `checks=195 failures=0 -> PASS`；QA 自动化回归 `checks=6 failures=0 -> PASS`
+- **测试状态**：单元测试 `checks=466 failures=0 -> PASS`（前台锁定态 `461`，两者均属 PASS，详见 `docs/02-构建与运行说明.md` 第 4 节）；QA 自动化回归 `checks=6 failures=0 -> PASS`
 - **已知缺陷**：0（累计发现并修复 5 项真实产品缺陷 + 1 项测试隔离缺陷 + 1 项 P0 卡死/不可恢复缺陷 + 1 项 P1 恢复位置/黑屏缺陷 + 1 项 P1 前台抢占缺陷，均有回归用例覆盖）
+- **界面语言**：简体中文 / 英文，默认跟随系统 UI 语言；对应语言版本未开发时回落到英文
 
 ## 二、交付物
 
@@ -22,22 +23,27 @@
 | `scripts/build.sh` | 一键构建脚本（固化了本机所需的 MSVC 环境注入） |
 | `app.manifest` | 主程序清单（`requireAdministrator`） |
 | `resources/config.schema.json` | 配置 JSON Schema |
+| `resources/lang/` | 语言文档：`en-US.json`（权威键集）/ `zh-CN.json`，构建期以 `RCDATA` 内嵌 |
 | `src/main.cpp` | `wWinMain` 入口（单实例 + `--settings`） |
 | `src/self/` | 自身外壳：`SelfShell`（message-only window）/ `HotkeyManager`（热键注册与重注册回滚）/ `Logger`（默认关闭） |
 | `src/core/` | 核心引擎：`Types` / `Json`（自实现，零依赖）/ `AppRuleStore` / `StateStore` / `ProcessWindowResolver` / `HideOrchestrator` / `WindowHider` / `AudioMuter` / `WinEventHook` / `TrayIconHider` / `ProcessController` / `ProcessWatcher` / `VirtualDesktopMover` / `JumpListCleaner` |
+| `src/i18n/` | 国际化：`Localizer`（语言加载 / 两级回退 / 位置占位符模板） |
 | `src/ui/SettingsWindow.cpp` | 设置界面（原生 Win32，热键录制 + 规则管理） |
 | `src/cli/main_cli.cpp` | 命令行外壳（asInvoker，自动化验证抓手） |
-| `tests/core_tests.cpp` | 纯逻辑单元测试（113 项断言） |
+| `tests/core_tests.cpp` | 纯逻辑单元测试（466 项断言；前台锁定态 461 项） |
 | `tests/qa_ui_tests.cpp` | QA 追加：设置界面可达性测试 |
 
 ### 文档
 
 | 路径 | 说明 |
 |---|---|
-| `docs/01-架构设计与可行性分析.md` | 架构设计与可行性分析（13 章 / 865 行） |
+| `docs/01-架构设计与可行性分析.md` | 架构设计与可行性分析（15 章 / 911 行） |
 | `docs/02-构建与运行说明.md` | 构建、运行、配置、限制说明（含快照语义约定 8.1 节） |
+| `docs/en/01-architecture-and-feasibility.md` | 架构设计与可行性分析（英文版） |
+| `docs/en/02-build-and-run.md` | 构建、运行、配置、限制说明（英文版） |
 | `docs/class-diagram.mermaid` / `docs/sequence-diagram.mermaid` | 类图与时序图 |
 | `overview.md` | 本文件 |
+| `overview.en.md` / `CONTRIBUTING.en.md` / `GIT_WORKFLOW.en.md` | 本文件与协作规范的英文版 |
 
 ### 构建产物
 
@@ -56,7 +62,7 @@
 | 移出 Alt+Tab | `WS_EX_TOOLWINDOW` | 随窗口隐藏一并生效 |
 | 兜住应用自我重显 | `SetWinEventHook(EVENT_OBJECT_SHOW)` | QA 强制 `ShowWindow(SW_SHOW)` 后再 hide → restore 仍可恢复，矩形不变 |
 | **恢复时置顶（新增配置项）** | `AppConfig::bringRestoredToFront`（默认 `false`）+ 设置界面「恢复时将窗口置顶」复选框 | 勾选=恢复后 `SetForegroundWindow` 置顶；不勾选=恢复后把前台归还给用户恢复前正在使用的窗口（WPS 是顶层时不受影响） |
-| **前台归还（P1 回归）** | `HideOrchestrator::RestoreAll` 恢复前记录 `GetForegroundWindow()`，所有窗口恢复完后**一次性**归还前台 | 修复"不勾选置顶但窗口仍被置顶"：`SetWindowPlacement` 无 no-activate 选项，恢复必然激活窗口 | 反向验证：临时禁用修复后 3 项断言失败（证明 bug 可复现且断言真实生效），启用后 195/195 全绿 |
+| **前台归还（P1 回归）** | `HideOrchestrator::RestoreAll` 恢复前记录 `GetForegroundWindow()`，所有窗口恢复完后**一次性**归还前台 | 修复"不勾选置顶但窗口仍被置顶"：`SetWindowPlacement` 无 no-activate 选项，恢复必然激活窗口 | 反向验证：临时禁用修复后 3 项断言失败（证明 bug 可复现且断言真实生效），启用后 195/195 全绿（该证据记录于 2026-09-11，当时套件共 195 项断言） |
 | 静音应用音频 | WASAPI 会话级 `ISimpleAudioVolume::SetMute` + `IAudioSessionNotification` | 代码路径 + 编译验证（测试目标无音频会话，**未做真实听感验证**） |
 | 隐藏自身痕迹 | `wWinMain` + message-only window，不注册托盘 | 无窗口 / 无托盘 / 无控制台 |
 | 窗口位置保真 | 快照 `WINDOWPLACEMENT` + `GWL_STYLE`/`GWL_EXSTYLE` | 移到 (320,240,980,700) → 隐藏 → 恢复后矩形**完全一致**，HWND 不变 |
@@ -65,6 +71,7 @@
 | 跳转列表清理（可选） | 按应用 `IApplicationDestinations` | 代码级（**未实测**），默认关闭 |
 | 托盘图标隐藏 | Win10 经典 `ToolbarWindow32` + `TB_HIDEBUTTON` | 代码级；Win11 无 `ToolbarWindow32` 时优雅降级返回 false（**未实测**） |
 | 快捷键修改界面 | 原生 Win32 窗口，录制式录入 + 冲突检测 | 窗口类注册 / 创建 / 销毁已验证；**点击级交互未验证** |
+| 多语言界面 | `Localizer` + 内嵌 `RCDATA` 语言文档 | 中英文键集 **72 键完全一致**、占位符 `{0}`–`{3}` 逐键对齐；`fr-FR` 回落到 `en-US`；缺键回落到英文同键值；单元测试 `TestLocalizerFallbackAndParity` 覆盖 |
 
 ## 四、实现过程中发现并修复的缺陷
 
@@ -114,6 +121,8 @@
 7. **音频静音**：目标选一个正在播放声音的应用，验证隐藏时静音、恢复时声音回来。
 8. **管理员目标**：对以管理员身份运行的应用验证隐藏（这是提权运行的意义所在）。
 9. **Win11 托盘**：确认托盘图标隐藏项按预期降级（不报错、不篡改系统）。
+10. **语言跟随**：把配置 `language` 设为 `en-US`，重启后打开设置界面，确认文案全部为英文且无任何空字符串或键名泄漏；再设为 `zh-CN` 确认全部为中文。
+11. **系统语言跟随**：把 `language` 改回 `auto`，在英文系统（或把系统 UI 语言切为英文）下确认界面自动切为英文。
 
 ## 七、已知遗留事项
 
@@ -122,6 +131,7 @@
 3. 未做代码签名：`requireAdministrator` + 未签名 exe 可能触发 SmartScreen 提示。
 4. `hideutil_tests` 与 `hideutil_qa_tests` 为开发期验证目标，可分发包中移除。
 5. `%APPDATA%\HideUtil\state.json` 与 `config.json` 为运行时真实状态/配置（已被本次 P0 修复完整恢复并清理），属用户数据。
+6. 设置界面暂未提供语言下拉框；默认 `auto` 已能满足「跟随系统语言」的需求。另：**CLI 诊断输出刻意保持英文**，不随界面语言变化。
 
 ## 八、构建与运行
 

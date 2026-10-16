@@ -15,12 +15,16 @@
 #include "self/HotkeyManager.h"
 #include "self/InstanceHandoff.h"
 
+#include "i18n/Localizer.h"
+
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -191,6 +195,135 @@ void TestConfigRoundTrip() {
     CHECK(parsed.hotkey.openSettings.key == L"F11");
     CHECK(parsed.hotkey.hideToggle.modifiers.size() == 2);
     CHECK(parsed.runtime.pollIntervalMs == 1500);
+}
+
+void TestLanguageConfigRoundTrip() {
+    std::printf("-- language config persistence round trip\n");
+    using hideutil::core::AppConfig;
+    using hideutil::core::AppRuleStore;
+    using hideutil::core::MakeDefaultConfig;
+
+    // Isolation: same trick as TestOrchestratorIdempotency() -- persist to a
+    // dedicated file in the working directory so the assertions neither touch
+    // nor depend on the real %APPDATA%\HideUtil\config.json that manual/CLI
+    // runs may have left behind.
+    const std::wstring kLangConfig = L"hideutil_test_language_config.json";
+    DeleteFileW(kLangConfig.c_str());  // start clean even after a prior run
+
+    // Default: follow the OS language until the user picks one explicitly.
+    CHECK(MakeDefaultConfig().language == L"auto");
+
+    // Every value goes through a real Save() -> Load() cycle with a *fresh*
+    // store, so nothing is served from an in-memory config.
+    const wchar_t* const kValues[] = {L"zh-CN", L"en-US", L"fr-FR"};
+    for (const wchar_t* value : kValues) {
+        AppRuleStore writer;
+        writer.MutableConfig().language = value;
+        CHECK(writer.Save(kLangConfig));
+
+        AppRuleStore reader;
+        CHECK(reader.Load(kLangConfig));
+        CHECK(reader.Config().language == value);
+    }
+
+    // Edge case read off JsonToConfig (src/core/AppRuleStore.cpp:309-313): the
+    // field is taken whenever it is a *non-empty* string and there is no enum
+    // whitelist, so a value outside the schema's {auto,en-US,zh-CN} -- the
+    // "fr-FR" case above -- survives the round trip verbatim. An empty string
+    // fails the !empty() guard, so the MakeDefaultConfig() baseline built at
+    // :303 stays in place and the field falls back to "auto".
+    AppRuleStore emptyWriter;
+    emptyWriter.MutableConfig().language = L"";
+    CHECK(emptyWriter.Save(kLangConfig));
+
+    AppRuleStore emptyReader;
+    CHECK(emptyReader.Load(kLangConfig));
+    CHECK(emptyReader.Config().language == L"auto");
+
+    DeleteFileW(kLangConfig.c_str());  // leave the workspace clean
+}
+
+void TestRuleIdUniqueness() {
+    std::printf("-- rule id generation / duplicate repair\n");
+    using hideutil::core::AppRule;
+    using hideutil::core::GenerateUniqueRuleId;
+    using hideutil::core::NormalizeDuplicateRuleIds;
+
+    const auto MakeRules = [](const std::vector<std::wstring>& ids) {
+        std::vector<AppRule> rules;
+        rules.reserve(ids.size());
+        for (const std::wstring& id : ids) {
+            AppRule rule;
+            rule.id = id;
+            rules.push_back(rule);
+        }
+        return rules;
+    };
+    const auto ContainsId = [](const std::vector<AppRule>& rules, const std::wstring& id) {
+        for (const AppRule& rule : rules) {
+            if (rule.id == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 1. Empty list: numbering starts at 1.
+    CHECK(GenerateUniqueRuleId(MakeRules({})) == L"rule-1");
+
+    // 2. Contiguous list: takes the next integer.
+    CHECK(GenerateUniqueRuleId(MakeRules({L"rule-1"})) == L"rule-2");
+
+    // 3. Hole left by a deleted rule: the free slot is reused, and the result
+    //    still does not collide with anything present.
+    {
+        const std::vector<AppRule> rules = MakeRules({L"rule-1", L"rule-3"});
+        const std::wstring id = GenerateUniqueRuleId(rules);
+        CHECK(id == L"rule-2");
+        CHECK(!ContainsId(rules, id));
+    }
+
+    // 4. Regression for the original defect: rules_.size() + 1 rewinds after a
+    //    delete, so the old generator kept handing out an id that was already
+    //    in use. Delete the middle rule, then generate 8 times, appending each
+    //    result -- every single id must be absent from the list it came from.
+    {
+        std::vector<AppRule> rules = MakeRules({L"rule-1", L"rule-2", L"rule-3"});
+        rules.erase(rules.begin() + 1);  // {rule-1, rule-3}
+        for (int i = 0; i < 8; ++i) {
+            const std::wstring id = GenerateUniqueRuleId(rules);
+            CHECK(!ContainsId(rules, id));
+            AppRule added;
+            added.id = id;
+            rules.push_back(added);
+        }
+        CHECK(rules.size() == std::size_t{10});
+        for (std::size_t i = 0; i < rules.size(); ++i) {
+            for (std::size_t j = i + 1; j < rules.size(); ++j) {
+                CHECK(rules[i].id != rules[j].id);
+            }
+        }
+    }
+
+    // 5. The real user config had {rule-2, rule-2, rule-3}: the first
+    //    occurrence must survive untouched and every id must end up distinct.
+    std::vector<AppRule> repaired = MakeRules({L"rule-2", L"rule-2", L"rule-3"});
+    NormalizeDuplicateRuleIds(repaired);
+    CHECK(repaired.size() == std::size_t{3});
+    CHECK(repaired[0].id == L"rule-2");
+    for (std::size_t i = 0; i < repaired.size(); ++i) {
+        for (std::size_t j = i + 1; j < repaired.size(); ++j) {
+            CHECK(repaired[i].id != repaired[j].id);
+        }
+    }
+
+    // 6. Idempotency: a second pass must not change anything at all.
+    const std::vector<AppRule> once = repaired;
+    NormalizeDuplicateRuleIds(repaired);
+    CHECK(repaired.size() == once.size());
+    for (std::size_t i = 0; i < once.size(); ++i) {
+        CHECK(repaired[i].id == once[i].id);
+    }
 }
 
 void TestOrchestratorIdempotency() {
@@ -577,13 +710,13 @@ void TestTargetFilterAndBadges() {
                                         hideutil::core::ToLowerCopy(L"记事本")));  // title, CJK
     CHECK(!hideutil::core::MatchesFilter(candidate, L"chrome"));
 
-    CHECK(hideutil::core::CandidateBadges(candidate) == L"后台");
+    CHECK(hideutil::core::CandidateBadges(candidate) == L"bg");
 
     candidate.isForeground = true;
     candidate.hasVisibleWindow = true;
     candidate.hasTrayIcon = true;
     candidate.likelyElevated = true;
-    CHECK(hideutil::core::CandidateBadges(candidate) == L"前台 窗口 托盘 管理员");
+    CHECK(hideutil::core::CandidateBadges(candidate) == L"fg win tray admin");
 
     const std::wstring described = hideutil::core::DescribeCandidate(candidate);
     CHECK(described.find(L"Notepad.EXE") != std::wstring::npos);
@@ -2170,11 +2303,92 @@ void TestRestoreWithoutActivationKeepsForeground() {
     DestroyWindow(userWindow);
 }
 
+// Locate resources/lang for the test executables: unlike HideUtil.exe they
+// embed no resource script, so the localizer must be pointed at the files.
+std::wstring FindLangDir() {
+    wchar_t modulePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    std::wstring exeDir(modulePath);
+    const std::size_t slash = exeDir.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        exeDir = exeDir.substr(0, slash);
+    }
+    // The build directory normally sits inside the project root.
+    const wchar_t* candidates[] = {L"\\resources\\lang", L"\\..\\resources\\lang",
+                                   L"\\..\\..\\resources\\lang"};
+    for (const wchar_t* suffix : candidates) {
+        const std::wstring dir = exeDir + suffix;
+        if (GetFileAttributesW((dir + L"\\en-US.json").c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return dir;
+        }
+    }
+    return std::wstring();
+}
+
+// Guards the i18n contract: every supported language must carry exactly the
+// same key set, an undeveloped language falls back to English, and a missing
+// key is echoed rather than silently blank.
+void TestLocalizerFallbackAndParity() {
+    std::printf("-- localizer parity and fallback\n");
+    using hideutil::i18n::Localizer;
+
+    const std::wstring langDir = FindLangDir();
+    // Both documents must be reachable; otherwise the wording assertions in
+    // this suite would be comparing against a bare key.
+    CHECK(!langDir.empty());
+    if (!langDir.empty()) {
+        std::vector<std::pair<std::wstring, std::wstring>> en;
+        std::vector<std::pair<std::wstring, std::wstring>> zh;
+        CHECK(Localizer::LoadMapFromFile(langDir + L"\\en-US.json", en));
+        CHECK(Localizer::LoadMapFromFile(langDir + L"\\zh-CN.json", zh));
+
+        std::vector<std::wstring> enKeys;
+        std::vector<std::wstring> zhKeys;
+        for (const auto& pair : en) enKeys.push_back(pair.first);
+        for (const auto& pair : zh) zhKeys.push_back(pair.first);
+        std::sort(enKeys.begin(), enKeys.end());
+        std::sort(zhKeys.begin(), zhKeys.end());
+        CHECK(enKeys == zhKeys);
+    }
+
+    // Language-level fallback: a language we have not developed -> English.
+    Localizer::Initialize(L"fr-FR");
+    CHECK(Localizer::Language() == L"en-US");
+    CHECK(Localizer::Get("settings.title") == L"HideUtil Settings");
+
+    // The active language is used when it carries the key.
+    Localizer::Initialize(L"zh-CN");
+    CHECK(Localizer::Language() == L"zh-CN");
+    CHECK(Localizer::Get("settings.title") == L"HideUtil 设置");
+    CHECK(Localizer::Get("common.cancel") == L"取消");
+
+    // A key in no document is echoed verbatim, so a missing translation never
+    // renders as an empty label.
+    CHECK(Localizer::Get("no.such.key") == L"no.such.key");
+
+    // Positional placeholders are substituted.
+    const std::wstring summary =
+        Localizer::Format(Localizer::Get("picker.summary"), L"4", L"2", L"1", L"1");
+    CHECK(summary.find(L"4") != std::wstring::npos);
+    CHECK(summary.find(L"2") != std::wstring::npos);
+    CHECK(summary.find(L"{0}") == std::wstring::npos);
+    CHECK(summary.find(L"{3}") == std::wstring::npos);
+
+    // Leave Chinese active for the wording assertions below.
+    Localizer::Initialize(L"zh-CN");
+}
+
 }  // namespace
 
 int wmain() {
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(hr);
+
+    // The test executables embed no resource script, so point the localizer at
+    // the language documents in the working tree. Chinese is exercised on
+    // purpose: the wording assertions below are written against zh-CN.
+    hideutil::i18n::Localizer::SetFileDir(FindLangDir());
+    hideutil::i18n::Localizer::Initialize(hideutil::i18n::kLangZhCN);
 
     std::printf("==== hideutil_tests ====\n");
     TestJsonRoundTrip();
@@ -2223,6 +2437,9 @@ int wmain() {
     TestRestoreKeepsMaximizedState();
     TestTransitionSuppressionFailSoft();
     TestRestoreWithoutActivationKeepsForeground();
+    TestLocalizerFallbackAndParity();
+    TestLanguageConfigRoundTrip();
+    TestRuleIdUniqueness();
 
     std::printf("========================\n");
     std::printf("checks=%d failures=%d -> %s\n", g_checks, g_failures,

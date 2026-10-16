@@ -243,11 +243,14 @@ void MarkRegisteredTrayApps(std::vector<TargetCandidate>& candidates,
 
 std::wstring CandidateBadges(const TargetCandidate& candidate) {
     std::wstring badges;
-    if (candidate.isForeground) badges += L"前台 ";
-    if (candidate.hasVisibleWindow) badges += L"窗口 ";
-    if (candidate.hasTrayIcon) badges += L"托盘 ";
-    if (candidate.likelyElevated) badges += L"管理员 ";
-    if (badges.empty()) badges = L"后台";
+    // Locale-independent English tokens: a compact, stable programmatic form.
+    // The settings picker translates them for display ("badge.*" keys), while
+    // the CLI prints them verbatim -- which is why they stay in English.
+    if (candidate.isForeground) badges += L"fg ";
+    if (candidate.hasVisibleWindow) badges += L"win ";
+    if (candidate.hasTrayIcon) badges += L"tray ";
+    if (candidate.likelyElevated) badges += L"admin ";
+    if (badges.empty()) badges = L"bg";
     while (!badges.empty() && badges.back() == L' ') {
         badges.pop_back();
     }
@@ -256,7 +259,7 @@ std::wstring CandidateBadges(const TargetCandidate& candidate) {
 
 std::wstring DescribeCandidate(const TargetCandidate& candidate) {
     std::wstring result = L"[" + CandidateBadges(candidate) + L"] ";
-    result += candidate.processName.empty() ? L"(未知程序)" : candidate.processName;
+    result += candidate.processName.empty() ? L"(unknown)" : candidate.processName;
     if (!candidate.windowTitle.empty()) {
         result += L" - ";
         result += candidate.windowTitle;

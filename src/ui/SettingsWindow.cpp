@@ -5,6 +5,8 @@
 
 #include "self/Logger.h"
 
+#include "i18n/Localizer.h"
+
 #include <commctrl.h>
 
 #include <algorithm>
@@ -14,6 +16,32 @@ namespace hideutil {
 namespace ui {
 
 namespace {
+
+using L10n = hideutil::i18n::Localizer;
+
+// Map the locale-independent English badge tokens produced by
+// core::CandidateBadges ("fg", "win", "tray", "admin", "bg") to the active
+// display language for the picker's flag column.
+std::wstring LocalizeBadges(const std::wstring& tokens) {
+    std::wstring result;
+    std::size_t start = 0;
+    while (start < tokens.size()) {
+        const std::size_t space = tokens.find(L' ', start);
+        const std::wstring token = tokens.substr(
+            start, space == std::wstring::npos ? std::wstring::npos : space - start);
+        if (!token.empty()) {
+            if (!result.empty()) {
+                result += L' ';
+            }
+            result += L10n::Get(L"badge." + token);
+        }
+        if (space == std::wstring::npos) {
+            break;
+        }
+        start = space + 1;
+    }
+    return result;
+}
 
 // The application icon embedded by resources/HideUtil.rc. Loaded from the
 // running module, so it also works for hideutil_cli.exe; a module without the
@@ -143,11 +171,13 @@ void ApplyPickerGroups(HWND list, int withWindowCount, int backgroundCount) {
 
     if (withWindowCount > 0) {
         insert(kGroupHasWindow,
-               L"有窗口的应用程序（" + std::to_wstring(withWindowCount) + L"）· 建议优先选择");
+               L10n::Format(L10n::Get("picker.group.withWindow"),
+                            std::to_wstring(withWindowCount)));
     }
     if (backgroundCount > 0) {
         insert(kGroupBackground,
-               L"后台进程 · 无窗口（" + std::to_wstring(backgroundCount) + L"）");
+               L10n::Format(L10n::Get("picker.group.background"),
+                            std::to_wstring(backgroundCount)));
     }
 }
 
@@ -259,7 +289,11 @@ std::wstring FormatSpec(const core::HotkeySpec& spec) {
         result += modifier;
         result += L"+";
     }
-    result += spec.key.empty() ? L"(未设置)" : spec.key;
+    if (spec.key.empty()) {
+        result += L10n::Get("hotkey.unset");
+    } else {
+        result += spec.key;
+    }
     return result;
 }
 
@@ -362,7 +396,7 @@ LRESULT CALLBACK RuleEditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
                     if (!picked.processName.empty()) SetControlText(hwnd, IDC_RE_PROC, picked.processName);
                     if (!picked.windowClass.empty()) SetControlText(hwnd, IDC_RE_CLASS, picked.windowClass);
                     const std::wstring currentName = ControlText(hwnd, IDC_RE_NAME);
-                    if (currentName.empty() || currentName == L"新规则") {
+                    if (currentName.empty() || currentName == L10n::Get("settings.rule.defaultName")) {
                         SetControlText(hwnd, IDC_RE_NAME, picked.processName);
                     }
                 }
@@ -374,8 +408,8 @@ LRESULT CALLBACK RuleEditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
                 const std::wstring proc = ControlText(hwnd, IDC_RE_PROC);
                 const std::wstring cls = ControlText(hwnd, IDC_RE_CLASS);
                 if (exePath.empty() && proc.empty() && cls.empty()) {
-                    MessageBoxW(hwnd, L"至少需要填写 exe 路径 / 进程名 / 窗口类 之一。", L"提示",
-                                MB_OK | MB_ICONWARNING);
+                    MessageBoxW(hwnd, L10n::Get("ruleedit.err.needOne").c_str(),
+                                L10n::Get("common.hint").c_str(), MB_OK | MB_ICONWARNING);
                     return 0;
                 }
                 core::AppRule rule;
@@ -503,7 +537,8 @@ void FillPickerList(TargetPickerState& state) {
     IconCache& icons = SharedIconCache();
     for (std::size_t i = 0; i < state.visible.size(); ++i) {
         const core::TargetCandidate& candidate = state.visible[i];
-        std::wstring name = candidate.processName.empty() ? L"(未知程序)" : candidate.processName;
+        std::wstring name =
+            candidate.processName.empty() ? L10n::Get("unknown.program") : candidate.processName;
 
         LVITEMW item{};
         item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_GROUPID;
@@ -513,7 +548,7 @@ void FillPickerList(TargetPickerState& state) {
         item.iGroupId = candidate.hasVisibleWindow ? kGroupHasWindow : kGroupBackground;
         const int inserted = ListView_InsertItem(state.list, &item);
 
-        const std::wstring badges = core::CandidateBadges(candidate);
+        const std::wstring badges = LocalizeBadges(core::CandidateBadges(candidate));
         ListView_SetItemText(state.list, inserted, 1, const_cast<LPWSTR>(badges.c_str()));
         const std::wstring title = candidate.windowTitle.empty() ? L"-" : candidate.windowTitle;
         ListView_SetItemText(state.list, inserted, 2, const_cast<LPWSTR>(title.c_str()));
@@ -525,17 +560,18 @@ void FillPickerList(TargetPickerState& state) {
         ListView_SetItemState(state.list, 0, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
     }
-    wchar_t summary[160];
-    swprintf_s(summary, L"共 %zu 个程序，当前显示 %zu 个（有窗口 %d，无窗口 %d）。选中后点「确定」。",
-               state.all.size(), state.visible.size(), withWindowCount, backgroundCount);
-    SetDlgItemTextW(state.hwnd, IDC_TP_STATUS, summary);
+    const std::wstring summary = L10n::Format(
+        L10n::Get("picker.summary"), std::to_wstring(state.all.size()),
+        std::to_wstring(state.visible.size()), std::to_wstring(withWindowCount),
+        std::to_wstring(backgroundCount));
+    SetDlgItemTextW(state.hwnd, IDC_TP_STATUS, summary.c_str());
 }
 
 void AcceptPickerSelection(TargetPickerState& state) {
     const int row = ListView_GetNextItem(state.list, -1, LVNI_SELECTED);
     if (row < 0 || static_cast<std::size_t>(row) >= state.visible.size()) {
-        MessageBoxW(state.hwnd, L"请先在上方列表中选择一个程序。", L"提示",
-                    MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(state.hwnd, L10n::Get("picker.err.selectFirst").c_str(),
+                    L10n::Get("common.hint").c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
     state.picked = state.visible[static_cast<std::size_t>(row)];
@@ -646,7 +682,7 @@ bool RunTargetPickerDialog(HINSTANCE instance, HWND parent,
     RECT rect{0, 0, 724, 470};
     AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kTargetPickerClass,
-                                L"选择要隐藏的程序", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                                L10n::Get("picker.title").c_str(), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                 CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left,
                                 rect.bottom - rect.top, parent, nullptr, instance, nullptr);
     if (hwnd == nullptr) {
@@ -663,7 +699,7 @@ bool RunTargetPickerDialog(HINSTANCE instance, HWND parent,
     HWND filter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 16, 16, 502, 26,
                                   hwnd, filterMenu, instance, nullptr);
-    HWND refresh = CreateWindowExW(0, L"BUTTON", L"刷新", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 526, 16,
+    HWND refresh = CreateWindowExW(0, L"BUTTON", L10n::Get("picker.btn.refresh").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 526, 16,
                                    88, 26, hwnd,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TP_REFRESH)),
                                    instance, nullptr);
@@ -684,7 +720,12 @@ bool RunTargetPickerDialog(HINSTANCE instance, HWND parent,
         int width;
     };
     // First column a little wider to make room for the 16x16 icon.
-    const ColumnSpec columns[] = {{L"程序", 196}, {L"标记", 96}, {L"窗口标题", 196}, {L"可执行路径", 180}};
+    const std::wstring colProgram = L10n::Get("picker.col.program");
+    const std::wstring colBadges = L10n::Get("picker.col.badges");
+    const std::wstring colTitle = L10n::Get("picker.col.title");
+    const std::wstring colPath = L10n::Get("picker.col.path");
+    const ColumnSpec columns[] = {{colProgram.c_str(), 196}, {colBadges.c_str(), 96},
+                                  {colTitle.c_str(), 196}, {colPath.c_str(), 180}};
     for (int i = 0; i < 4; ++i) {
         LVCOLUMNW column{};
         column.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -698,11 +739,11 @@ bool RunTargetPickerDialog(HINSTANCE instance, HWND parent,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TP_STATUS)),
                                   instance, nullptr);
 
-    HWND ok = CreateWindowExW(0, L"BUTTON", L"确定",
+    HWND ok = CreateWindowExW(0, L"BUTTON", L10n::Get("common.ok").c_str(),
                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 516, 392, 90, 30,
                               hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TP_OK)), instance,
                               nullptr);
-    HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 614, 392,
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L10n::Get("common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 614, 392,
                                   90, 30, hwnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TP_CANCEL)),
                                   instance, nullptr);
@@ -756,7 +797,7 @@ bool RunRuleEditorDialog(HINSTANCE instance, HWND parent,
     state.enumerate = &enumerateTargets;
 
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kRuleEditorClass,
-                                L"规则编辑", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                                L10n::Get("ruleedit.title").c_str(), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 580, 430, parent, nullptr, instance,
                                 nullptr);
     if (hwnd == nullptr) {
@@ -765,46 +806,48 @@ bool RunRuleEditorDialog(HINSTANCE instance, HWND parent,
     state.hwnd = hwnd;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
 
-    AddLabel(hwnd, L"名称", 15, 15, 100);
+    AddLabel(hwnd, L10n::Get("ruleedit.label.name").c_str(), 15, 15, 100);
     AddEdit(hwnd, IDC_RE_NAME, 120, 12, 320, rule.name);
-    AddLabel(hwnd, L"exe 路径", 15, 47, 100);
+    AddLabel(hwnd, L10n::Get("ruleedit.label.exePath").c_str(), 15, 47, 100);
     AddEdit(hwnd, IDC_RE_EXEPATH, 120, 44, 320, rule.match.exePath ? *rule.match.exePath : L"");
-    HWND pick = CreateWindowExW(0, L"BUTTON", L"从列表选择…", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 450,
+    HWND pick = CreateWindowExW(0, L"BUTTON", L10n::Get("ruleedit.btn.pick").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 450,
                                 44, 110, 26, hwnd,
                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RE_PICK)), nullptr,
                                 nullptr);
     SendMessageW(pick, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-    AddLabel(hwnd, L"进程名", 15, 79, 100);
+    AddLabel(hwnd, L10n::Get("ruleedit.label.processName").c_str(), 15, 79, 100);
     AddEdit(hwnd, IDC_RE_PROC, 120, 76, 320, rule.match.processName ? *rule.match.processName : L"");
-    AddLabel(hwnd, L"窗口类", 15, 111, 100);
+    AddLabel(hwnd, L10n::Get("ruleedit.label.windowClass").c_str(), 15, 111, 100);
     AddEdit(hwnd, IDC_RE_CLASS, 120, 108, 320, rule.match.windowClass ? *rule.match.windowClass : L"");
 
-    AddLabel(hwnd, L"匹配模式", 15, 143, 100);
+    AddLabel(hwnd, L10n::Get("ruleedit.label.matchMode").c_str(), 15, 143, 100);
     HWND combo = CreateWindowExW(0, L"COMBOBOX", L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 120, 141, 160,
                                  200, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RE_MODE)),
                                  nullptr, nullptr);
     SendMessageW(combo, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"any"));
-    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"all"));
+    const std::wstring modeAny = L10n::Get("ruleedit.matchMode.any");
+    const std::wstring modeAll = L10n::Get("ruleedit.matchMode.all");
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(modeAny.c_str()));
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(modeAll.c_str()));
     SendMessageW(combo, CB_SETCURSEL,
                  (rule.match.matchMode == core::MatchMode::All) ? 1 : 0, 0);
 
-    AddCheck(hwnd, IDC_RE_HIDEWIN, L"隐藏窗口", 15, 180, 140, rule.actions.hideWindow);
-    AddCheck(hwnd, IDC_RE_HIDETRAY, L"隐藏托盘图标", 165, 180, 140, rule.actions.hideTrayIcon);
-    AddCheck(hwnd, IDC_RE_MUTE, L"静音", 315, 180, 120, rule.actions.muteAudio);
-    AddCheck(hwnd, IDC_RE_TOOLWIN, L"移出 Alt+Tab", 15, 206, 140, rule.actions.hideFromAltTab);
-    AddCheck(hwnd, IDC_RE_SUSPEND, L"挂起进程", 165, 206, 140, rule.actions.suspendProcess);
-    AddCheck(hwnd, IDC_RE_DESKTOP, L"移到独立虚拟桌面", 15, 232, 180,
+    AddCheck(hwnd, IDC_RE_HIDEWIN, L10n::Get("ruleedit.check.hideWindow").c_str(), 15, 180, 140, rule.actions.hideWindow);
+    AddCheck(hwnd, IDC_RE_HIDETRAY, L10n::Get("ruleedit.check.hideTray").c_str(), 165, 180, 140, rule.actions.hideTrayIcon);
+    AddCheck(hwnd, IDC_RE_MUTE, L10n::Get("ruleedit.check.mute").c_str(), 315, 180, 120, rule.actions.muteAudio);
+    AddCheck(hwnd, IDC_RE_TOOLWIN, L10n::Get("ruleedit.check.altTab").c_str(), 15, 206, 140, rule.actions.hideFromAltTab);
+    AddCheck(hwnd, IDC_RE_SUSPEND, L10n::Get("ruleedit.check.suspend").c_str(), 165, 206, 140, rule.actions.suspendProcess);
+    AddCheck(hwnd, IDC_RE_DESKTOP, L10n::Get("ruleedit.check.desktop").c_str(), 15, 232, 180,
              rule.actions.moveToVirtualDesktop);
-    AddCheck(hwnd, IDC_RE_JUMPLIST, L"恢复时清空跳转列表", 200, 232, 200,
+    AddCheck(hwnd, IDC_RE_JUMPLIST, L10n::Get("ruleedit.check.jumpList").c_str(), 200, 232, 200,
              rule.actions.clearJumpList);
 
     const HMENU okMenu = reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RE_OK));
     const HMENU cancelMenu = reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RE_CANCEL));
-    HWND ok = CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+    HWND ok = CreateWindowExW(0, L"BUTTON", L10n::Get("common.ok").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                               370, 340, 90, 30, hwnd, okMenu, nullptr, nullptr);
-    HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L10n::Get("common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                   470, 340, 90, 30, hwnd, cancelMenu, nullptr, nullptr);
     SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
     SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
@@ -957,7 +1000,7 @@ bool SettingsWindow::Show(HINSTANCE instance, core::AppRuleStore& store, Setting
 
     RECT rect{0, 0, 660, 460};
     AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
-    hwnd_ = CreateWindowExW(0, ClassName(), L"HideUtil 设置",
+    hwnd_ = CreateWindowExW(0, ClassName(), L10n::Get("settings.title").c_str(),
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             rect.right - rect.left, rect.bottom - rect.top,
@@ -1009,26 +1052,26 @@ void SettingsWindow::CreateControls() {
     const HFONT font = UiFont();  // Segoe UI 9pt (Windows 11 default)
     const DWORD staticStyle = WS_CHILD | WS_VISIBLE | SS_LEFT;
 
-    labelHotkey_[0] = CreateWindowExW(0, L"STATIC", L"一键隐藏 / 恢复：", staticStyle, 0, 0, 1, 1,
+    labelHotkey_[0] = CreateWindowExW(0, L"STATIC", L10n::Get("settings.hotkey.hideToggle").c_str(), staticStyle, 0, 0, 1, 1,
                                       hwnd_, nullptr, instance_, nullptr);
     valueHotkey_[0] = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER,
                                       0, 0, 1, 1, hwnd_, nullptr, instance_, nullptr);
-    buttonRecord_[0] = CreateWindowExW(0, L"BUTTON", L"录制",
+    buttonRecord_[0] = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.record").c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1, hwnd_,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RECORD0)),
                                        instance_, nullptr);
 
-    labelHotkey_[1] = CreateWindowExW(0, L"STATIC", L"打开设置界面：", staticStyle, 0, 0, 1, 1, hwnd_,
+    labelHotkey_[1] = CreateWindowExW(0, L"STATIC", L10n::Get("settings.hotkey.openSettings").c_str(), staticStyle, 0, 0, 1, 1, hwnd_,
                                       nullptr, instance_, nullptr);
     valueHotkey_[1] = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER,
                                       0, 0, 1, 1, hwnd_, nullptr, instance_, nullptr);
-    buttonRecord_[1] = CreateWindowExW(0, L"BUTTON", L"录制",
+    buttonRecord_[1] = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.record").c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1, hwnd_,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RECORD1)),
                                        instance_, nullptr);
 
     checkboxBringToFront_ = CreateWindowExW(
-        0, L"BUTTON", L"恢复时将窗口置顶（不勾选则保持当前桌面层级，避免抢占前台）",
+        0, L"BUTTON", L10n::Get("settings.bringToFront").c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BRING_TO_FRONT)),
         instance_, nullptr);
@@ -1048,33 +1091,33 @@ void SettingsWindow::CreateControls() {
     LVCOLUMNW column{};
     column.mask = LVCF_TEXT | LVCF_WIDTH;
     column.cx = 178;
-    column.pszText = const_cast<LPWSTR>(L"名称");
+    column.pszText = const_cast<LPWSTR>(L10n::Get("settings.col.name").c_str());
     ListView_InsertColumn(listRules_, 0, &column);
     column.cx = 236;
-    column.pszText = const_cast<LPWSTR>(L"匹配");
+    column.pszText = const_cast<LPWSTR>(L10n::Get("settings.col.match").c_str());
     ListView_InsertColumn(listRules_, 1, &column);
     column.cx = 156;
-    column.pszText = const_cast<LPWSTR>(L"动作");
+    column.pszText = const_cast<LPWSTR>(L10n::Get("settings.col.actions").c_str());
     ListView_InsertColumn(listRules_, 2, &column);
 
-    buttonAdd_ = CreateWindowExW(0, L"BUTTON", L"新增", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1,
+    buttonAdd_ = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.add").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1,
                                  hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADD)),
                                  instance_, nullptr);
-    buttonEdit_ = CreateWindowExW(0, L"BUTTON", L"编辑", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1,
+    buttonEdit_ = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.edit").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1,
                                   1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)),
                                   instance_, nullptr);
-    buttonDelete_ = CreateWindowExW(0, L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0,
+    buttonDelete_ = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.delete").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0,
                                      1, 1, hwnd_,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DELETE)),
                                      instance_, nullptr);
-    buttonSave_ = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1,
+    buttonSave_ = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.save").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1,
                                   1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)),
                                   instance_, nullptr);
-    buttonCancel_ = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0,
+    buttonCancel_ = CreateWindowExW(0, L"BUTTON", L10n::Get("common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0,
                                     1, 1, hwnd_,
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CANCEL)),
                                     instance_, nullptr);
-    buttonQuit_ = CreateWindowExW(0, L"BUTTON", L"退出 HideUtil", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0,
+    buttonQuit_ = CreateWindowExW(0, L"BUTTON", L10n::Get("settings.btn.quit").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0,
                                   0, 1, 1, hwnd_,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QUIT)), instance_,
                                   nullptr);
@@ -1132,12 +1175,12 @@ void SettingsWindow::LayoutControls() {
 void SettingsWindow::RefreshHotkeyLabels() {
     if (valueHotkey_[0] != nullptr) {
         SetWindowTextW(valueHotkey_[0],
-                       recordingSlot_ == kSlotHideToggle ? L"按下组合键… (Esc 取消)"
+                       recordingSlot_ == kSlotHideToggle ? L10n::Get("settings.recording.prompt").c_str()
                                                          : FormatSpec(working_[0]).c_str());
     }
     if (valueHotkey_[1] != nullptr) {
         SetWindowTextW(valueHotkey_[1],
-                       recordingSlot_ == kSlotOpenSettings ? L"按下组合键… (Esc 取消)"
+                       recordingSlot_ == kSlotOpenSettings ? L10n::Get("settings.recording.prompt").c_str()
                                                            : FormatSpec(working_[1]).c_str());
     }
 }
@@ -1154,7 +1197,7 @@ void SettingsWindow::RefreshRules() {
         item.mask = LVIF_TEXT | LVIF_IMAGE;
         item.iItem = static_cast<int>(i);
         std::wstring name = rule.name.empty() ? rule.id : rule.name;
-        if (!rule.enabled) name += L" (禁用)";
+        if (!rule.enabled) name += L10n::Get("settings.rule.disabledSuffix");
         item.pszText = const_cast<LPWSTR>(name.c_str());
         // Show the program's own icon so the selected app is recognisable at a
         // glance, exactly like in the picker. Falls back to the generic exe
@@ -1178,7 +1221,7 @@ void SettingsWindow::BeginRecord(int slot) {
     if (host_.suspendHotkeys) {
         host_.suspendHotkeys();
     }
-    SetWindowTextW(labelStatus_, L"录制中：请按下新的组合键（至少包含一个修饰键），Esc 取消。");
+    SetWindowTextW(labelStatus_, L10n::Get("settings.status.recording").c_str());
     RefreshHotkeyLabels();
     SetFocus(hwnd_);
 }
@@ -1197,7 +1240,7 @@ bool SettingsWindow::CaptureHotkey(WPARAM vk) {
         return false;
     }
     if (vk == VK_ESCAPE) {
-        SetWindowTextW(labelStatus_, L"已取消录制。");
+        SetWindowTextW(labelStatus_, L10n::Get("settings.status.recordCancelled").c_str());
         EndRecord(false);
         return true;
     }
@@ -1210,7 +1253,7 @@ bool SettingsWindow::CaptureHotkey(WPARAM vk) {
         mods |= MOD_WIN;
     }
     if (mods == 0) {
-        SetWindowTextW(labelStatus_, L"需要至少一个修饰键（Ctrl / Alt / Shift / Win），请重按。");
+        SetWindowTextW(labelStatus_, L10n::Get("settings.status.needModifier").c_str());
         return false;
     }
 
@@ -1220,7 +1263,8 @@ bool SettingsWindow::CaptureHotkey(WPARAM vk) {
         host_.probeHotkey ? host_.probeHotkey(recordingSlot_, candidate, &conflict) : true;
     if (!usable) {
         SetWindowTextW(labelStatus_,
-                       conflict ? L"该组合已被占用，请换一个。" : L"该组合无效，请换一个。");
+                       conflict ? L10n::Get("settings.status.conflict").c_str()
+                                : L10n::Get("settings.status.invalid").c_str());
         return false;  // stay in recording mode
     }
 
@@ -1228,15 +1272,16 @@ bool SettingsWindow::CaptureHotkey(WPARAM vk) {
         *target = candidate;
         dirty_ = true;
     }
-    SetWindowTextW(labelStatus_, (L"已记录：" + FormatSpec(candidate) + L"（点「保存」生效）").c_str());
+    SetWindowTextW(labelStatus_,
+                   L10n::Format(L10n::Get("settings.status.recorded"), FormatSpec(candidate)).c_str());
     EndRecord(true);
     return true;
 }
 
 void SettingsWindow::OnAddRule() {
     core::AppRule rule;
-    rule.id = L"rule-" + std::to_wstring(rules_.size() + 1);
-    rule.name = L"新规则";
+    rule.id = core::GenerateUniqueRuleId(rules_);
+    rule.name = L10n::Get("settings.rule.defaultName");
     rule.actions.hideWindow = true;
     rule.actions.hideFromAltTab = true;
     if (RunRuleEditorDialog(instance_, hwnd_, host_.enumerateTargets, rule)) {
@@ -1249,7 +1294,7 @@ void SettingsWindow::OnAddRule() {
 void SettingsWindow::OnEditRule() {
     const int index = SelectedRuleIndex();
     if (index < 0 || static_cast<std::size_t>(index) >= rules_.size()) {
-        SetWindowTextW(labelStatus_, L"请先在列表中选择一条规则。");
+        SetWindowTextW(labelStatus_, L10n::Get("settings.status.selectRuleFirst").c_str());
         return;
     }
     core::AppRule rule = rules_[static_cast<std::size_t>(index)];
@@ -1263,7 +1308,7 @@ void SettingsWindow::OnEditRule() {
 void SettingsWindow::OnDeleteRule() {
     const int index = SelectedRuleIndex();
     if (index < 0 || static_cast<std::size_t>(index) >= rules_.size()) {
-        SetWindowTextW(labelStatus_, L"请先在列表中选择一条规则。");
+        SetWindowTextW(labelStatus_, L10n::Get("settings.status.selectRuleFirst").c_str());
         return;
     }
     rules_.erase(rules_.begin() + index);
@@ -1281,32 +1326,30 @@ void SettingsWindow::OnSave() {
     config.rules = rules_;
     config.bringRestoredToFront = bringRestoredToFront_;
     if (!store_->Save(core::AppRuleStore::DefaultConfigPath())) {
-        SetWindowTextW(labelStatus_, L"保存失败（无法写入配置文件）。");
+        SetWindowTextW(labelStatus_, L10n::Get("settings.status.saveFailed").c_str());
         return;
     }
     if (host_.onConfigChanged) {
         host_.onConfigChanged();
     }
     dirty_ = false;
-    SetWindowTextW(labelStatus_, L"已保存并立即生效。");
+    SetWindowTextW(labelStatus_, L10n::Get("settings.status.saved").c_str());
 }
 
 void SettingsWindow::OnQuitApp() {
     if (!host_.onQuitApp) {
         return;
     }
-    const int answer = MessageBoxW(
-        hwnd_,
-        L"退出 HideUtil 吗？\n\n退出前会先恢复全部已隐藏的窗口、任务栏按钮、音频与已挂起的进程，"
-        L"然后结束程序（两个全局热键随之失效）。",
-        L"退出 HideUtil", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
+    const int answer = MessageBoxW(hwnd_, L10n::Get("settings.quit.confirmBody").c_str(),
+                                   L10n::Get("settings.quit.confirmTitle").c_str(),
+                                   MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
     if (answer != IDOK) {
         return;
     }
 
     if (dirty_) {
-        const int saveFirst = MessageBoxW(hwnd_, L"有尚未保存的设置改动，要先保存吗？",
-                                          L"未保存的改动",
+        const int saveFirst = MessageBoxW(hwnd_, L10n::Get("settings.unsaved.confirmBody").c_str(),
+                                          L10n::Get("settings.unsaved.confirmTitle").c_str(),
                                           MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON3);
         if (saveFirst == IDCANCEL) {
             return;
@@ -1356,7 +1399,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
                         bringRestoredToFront_ =
                             SendMessageW(checkboxBringToFront_, BM_GETCHECK, 0, 0) == BST_CHECKED;
                         dirty_ = true;
-                        SetWindowTextW(labelStatus_, L"恢复时置顶已修改（点「保存」生效）。");
+                        SetWindowTextW(labelStatus_, L10n::Get("settings.status.bringToFrontChanged").c_str());
                     }
                     return 0;
                 case IDC_ADD: OnAddRule(); return 0;
