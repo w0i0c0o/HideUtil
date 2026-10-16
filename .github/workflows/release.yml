@@ -1,0 +1,133 @@
+name: Release
+
+# Pushing a vX.Y.Z tag builds HideUtil.exe and attaches it to the GitHub
+# Release for that tag. This is what makes the README download link
+#   ../../releases/latest/download/HideUtil.exe
+# resolve for end users: the binary lives in Releases, never in the repository
+# (the repository carries source only, and .gitignore excludes *.exe).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach HideUtil.exe
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Puts MSVC (cl.exe) and the Windows SDK (rc.exe, mt.exe) on PATH, so the
+      # Ninja generator works without a Visual Studio generator.
+      - name: Set up MSVC command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Inspect the deliverable
+        id: build_info
+        shell: pwsh
+        run: |
+          $exe = 'build/HideUtil.exe'
+          if (-not (Test-Path $exe)) { throw 'HideUtil.exe was not produced' }
+          # Reject a zero-byte or truncated artifact before it reaches users.
+          if ((Get-Item $exe).Length -lt 100KB) { throw 'HideUtil.exe is suspiciously small' }
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $exe).Length
+          "size=$size"   >> $env:GITHUB_OUTPUT
+          "sha256=$sha"  >> $env:GITHUB_OUTPUT
+          Write-Host "size=$size sha256=$sha"
+
+      # github.event.before is all zeros when a tag is created, so the previous
+      # tag has to be resolved from history for the changelog compare link.
+      - name: Resolve previous tag
+        id: prev
+        shell: bash
+        run: |
+          set -euo pipefail
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -z "$prev" ]; then prev="$(git rev-list --max-parents=0 HEAD)"; fi
+          echo "tag=$prev" >> "$GITHUB_OUTPUT"
+          echo "previous tag for changelog: $prev"
+
+      - name: Publish release with the single-file download
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          files: build/HideUtil.exe
+          body: |
+            ## Download — you need exactly one file
+
+            **`HideUtil.exe`** (${{ steps.build_info.outputs.size }} bytes) is the complete application. No installer, no Visual C++ Redistributable, no runtime, no DLLs, no configuration files to copy. Put it anywhere on a Windows machine and run it.
+
+            **SHA-256:** `${{ steps.build_info.outputs.sha256 }}`
+
+            Requirements: Windows 10 1809 / Windows Server 2019 or later, x64. Run as administrator — elevated rights are required to reach admin-level windows.
+
+            ### Quick start
+
+            1. Download `HideUtil.exe` from the assets below.
+            2. Run it — a fish-eye icon appears in the notification area.
+            3. Press **Ctrl+Alt+F12** to hide, press it again to restore.
+            4. Press **Ctrl+Alt+F11** to open Settings and add the applications you want covered.
+
+            Full changelog: https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.tag }}...${{ github.ref_name }}
+
+            ---
+
+            ## Scope and limitations
+
+            HideUtil is strictly user-mode: no drivers, no kernel hooks, no injection.
+
+            * It cannot hide a process from Task Manager — that needs a kernel rootkit.
+            * It cannot mute a device held in exclusive mode / ASIO.
+            * It removes tray icons it created itself; on Windows 11 it cannot remove icons owned by other applications.
+            * It makes no attempt to erase forensic traces.
+
+            Every hidden window is recorded in `%APPDATA%\HideUtil\state.json` before it is touched, so the tool self-heals on restart if killed mid-operation.
+
+            ---
+
+            ## 下载 —— 你只需要一个文件
+
+            **`HideUtil.exe`**（${{ steps.build_info.outputs.size }} 字节）就是完整程序。没有安装器、不需要 Visual C++ 运行库、不依赖任何运行时、不需要复制 DLL 或配置文件。放到任意位置直接运行即可。
+
+            **SHA-256：** `${{ steps.build_info.outputs.sha256 }}`
+
+            运行环境：Windows 10 1809 / Windows Server 2019 及以上，x64。请以管理员身份运行 —— 需要提升的权限才能覆盖管理员级窗口。
+
+            ### 快速上手
+
+            1. 从下方 Assets 下载 `HideUtil.exe`。
+            2. 运行它 —— 通知区域出现鱼眼图标。
+            3. 按 **Ctrl+Alt+F12** 隐藏，再按一次恢复。
+            4. 按 **Ctrl+Alt+F11** 打开设置，添加需要纳管的应用程序。
+
+            ### 能力边界
+
+            HideUtil 严格只使用用户态公开 API：无驱动、无内核 hook、无注入。
+
+            * 无法在任务管理器中隐藏进程（那需要内核 rootkit）。
+            * 无法静音独占模式 / ASIO 设备。
+            * 只能移除自己创建的托盘图标；Windows 11 上无法移除其他程序的托盘图标。
+            * 不做任何取证痕迹清除。
+
+            每个被隐藏的窗口在操作前都会先写入 `%APPDATA%\HideUtil\state.json`，因此即使中途被杀掉，下次启动也会自动恢复。
+
+            许可证：GPL-3.0

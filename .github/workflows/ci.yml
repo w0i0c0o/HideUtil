@@ -1,0 +1,61 @@
+name: CI
+
+# Compile gate for every push and pull request.
+#
+# Scope note: this deliberately does NOT gate on hideutil_tests.exe. That suite
+# drives real top-level windows, global hotkeys and process suspension against
+# the interactive desktop, so its result depends on the machine's session state
+# (see TestRestoreDoesNotStealForeground, which asserts a different number of
+# checks depending on whether the OS grants foreground). It is run
+# informationally below, never as a merge gate.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (Release, /MT)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Puts MSVC (cl.exe) and the Windows SDK (rc.exe, mt.exe) on PATH, so the
+      # Ninja generator works without a Visual Studio generator.
+      - name: Set up MSVC command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build all targets
+        run: cmake --build build --config Release
+
+      - name: Assert the single-file deliverable exists
+        shell: pwsh
+        run: |
+          $expected = @('HideUtil.exe', 'hideutil_cli.exe', 'hideutil_tests.exe', 'hideutil_qa_tests.exe')
+          foreach ($name in $expected) {
+            $path = Join-Path 'build' $name
+            if (-not (Test-Path $path)) { throw "missing build output: $name" }
+            $item = Get-Item $path
+            '{0,-24} {1,8} bytes' -f $name, $item.Length
+          }
+
+      # Informational only — see the scope note at the top of this file.
+      - name: Run unit tests (informational)
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./build/hideutil_tests.exe
