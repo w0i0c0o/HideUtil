@@ -2,16 +2,41 @@
 
 **One-click hide / restore for Windows — a Boss Key tool.**
 
+---
+
+## Download — you need exactly one file
+
+> ### [`HideUtil.exe`](../../releases/latest/download/HideUtil.exe)
+>
+> **That is the whole thing.** This repository is source code and documentation; to *use* the tool
+> you download **one executable** and nothing else. No installer, no Visual C++ Redistributable,
+> no runtime, no DLLs, no configuration files to copy.
+
+**Three steps:**
+
+1. Download [`HideUtil.exe`](../../releases/latest/download/HideUtil.exe) from the
+   [latest release](../../releases/latest).
+2. Double-click it and accept the UAC prompt — it needs administrator rights to manage elevated
+   windows. **Nothing appears: no window, no tray icon, no console.** That is by design.
+3. Press `Ctrl+Alt+F12` to hide the applications you configured, `Ctrl+Alt+F11` to open settings.
+
+Each release lists a **SHA-256** for the executable — worth checking before you run a downloaded
+binary. [All releases →](../../releases/latest)
+
+> Not sure whether this is what you want? Read
+> [Scope and limitations](#scope-and-limitations) first. In short: HideUtil hides the *visible
+> traces* of running applications. It deliberately cannot hide a process from Task Manager.
+
+---
+
+## What it does
+
 HideUtil is a Windows user-mode desktop utility. A single global hotkey hides every visible
 trace of the applications you configured — windows, taskbar buttons, Alt+Tab entries, tray icons
 and audio — and a second press brings them back exactly where they were, maximized state and
 geometry included.
 
 **Zero drivers. Zero kernel hooks. Only supported, public user-mode APIs.**
-
-> HideUtil hides *visual traces* of running applications. It is a privacy screen, not a process
-> concealer. It deliberately cannot hide a process from Task Manager — see
-> [Scope and limitations](#scope-and-limitations).
 
 ---
 
