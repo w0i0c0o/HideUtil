@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Xing Wei
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This file is part of HideUtil, licensed under the GNU General Public
+// License v3 or, at your option, any later version. See LICENSE.
+
 #include "core/Json.h"
 
 #include <windows.h>

@@ -130,4 +130,4 @@ jobs:
 
             每个被隐藏的窗口在操作前都会先写入 `%APPDATA%\HideUtil\state.json`，因此即使中途被杀掉，下次启动也会自动恢复。
 
-            许可证：GPL-3.0
+            许可证：GPL-3.0-or-later（见仓库 LICENSE）

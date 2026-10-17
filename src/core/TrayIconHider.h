@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Xing Wei
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This file is part of HideUtil, licensed under the GNU General Public
+// License v3 or, at your option, any later version. See LICENSE.
+
 // Best-effort tray icon hiding for the Windows 10 classic notification area
 // (ToolbarWindow32). On Windows 11 there is no ToolbarWindow32; we degrade
 // gracefully by returning false and never perform registry / explorer hacks.

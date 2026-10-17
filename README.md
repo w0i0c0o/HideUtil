@@ -251,8 +251,18 @@ Chinese versions: [`docs/01-架构设计与可行性分析.md`](docs/01-架构�
 
 ## License
 
-**GPL-3.0** — see [`LICENSE`](LICENSE).
+**`GPL-3.0-or-later`** — see [`LICENSE`](LICENSE).
 
-Copyright notices and the full license text are included in the repository. In short: you may use,
-modify and distribute this software, including commercially, provided that any derivative work is
-also released under GPL-3.0 with source made available.
+HideUtil is licensed under the GNU General Public License v3 **or, at your option, any later
+version** published by the Free Software Foundation. You may use, modify and distribute it,
+including commercially, provided that any derivative work is released under the same terms
+(`GPL-3.0-or-later`) with source made available.
+
+Copyright (C) 2026 Xing Wei.
+
+> Why `or-later` and not `GPL-3.0-only`: GPLv3 section 14 says that when a program specifies a
+> numbered version *without* the "or later" grant, only that version applies. This project grants
+> the upgrade explicitly, so the SPDX identifier is `GPL-3.0-or-later`. The same `or any later
+> version` grant is stated at the top of `LICENSE`, and every source file carries a machine-readable
+> `SPDX-License-Identifier` header, so the grant survives even if a single file is copied out of
+> this repository.

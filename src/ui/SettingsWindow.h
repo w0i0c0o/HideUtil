@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Xing Wei
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This file is part of HideUtil, licensed under the GNU General Public
+// License v3 or, at your option, any later version. See LICENSE.
+
 // Native Win32 settings window (no third-party UI library).
 //
 // Created on demand and destroyed on close (WM_CLOSE -> DestroyWindow); the

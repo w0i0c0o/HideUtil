@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Xing Wei
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This file is part of HideUtil, licensed under the GNU General Public
+// License v3 or, at your option, any later version. See LICENSE.
+
 // Central PID <-> HWND aggregation. No other module enumerates windows
 // directly (design document section 10: "PID <-> HWND mapping").
 #pragma once
