@@ -262,7 +262,8 @@ Copyright (C) 2026 Xing Wei.
 
 > Why `or-later` and not `GPL-3.0-only`: GPLv3 section 14 says that when a program specifies a
 > numbered version *without* the "or later" grant, only that version applies. This project grants
-> the upgrade explicitly, so the SPDX identifier is `GPL-3.0-or-later`. The same `or any later
-> version` grant is stated at the top of `LICENSE`, and every source file carries a machine-readable
+> the upgrade explicitly, so the SPDX identifier is `GPL-3.0-or-later`. The grant itself is stated in
+> [`NOTICE.md`](NOTICE.md), and every source file carries a machine-readable
 > `SPDX-License-Identifier` header, so the grant survives even if a single file is copied out of
-> this repository.
+> this repository. `LICENSE` is left as the verbatim GPLv3 text: GitHub's licence detector matches on
+> that text, and prepending anything to it makes GitHub report the project as "Other".
