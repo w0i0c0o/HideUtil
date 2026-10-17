@@ -1,4 +1,10 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: 2026 Xing Wei
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of HideUtil, licensed under the GNU General Public
+# License v3 or, at your option, any later version. See LICENSE.
 # Pre-commit hook: gate every commit on a clean build + passing tests.
 # scripts/build.sh injects the MSVC / Windows SDK / CMake environment itself,
 # so no external PATH setup is required before running this hook.
